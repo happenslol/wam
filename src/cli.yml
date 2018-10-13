@@ -1,0 +1,7 @@
+name: wam
+version: "1.0"
+author: Hilmar Wiegand <me@hwgnd.de>
+about: wow addon manager
+subcommands:
+    - install:
+        about: installs new addons and updates existing ones
