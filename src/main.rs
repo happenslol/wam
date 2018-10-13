@@ -63,7 +63,7 @@ fn main() {
     fs::create_dir(temp_dir).expect("could not create temp dir");
 
     let addon_dir = Path::new("Interface/AddOns");
-    if !addon_dir.is_path() {
+    if !addon_dir.is_dir() {
         fs::create_dir_all(addon_dir).unwrap()
     }
 
