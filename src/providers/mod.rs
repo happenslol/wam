@@ -34,12 +34,6 @@ fn get_curse_lock(addon: &Addon) -> Option<AddonLock> {
     let doc = Document::from(files_page.as_str());
 
     let (version, timestamp) = doc.find(Class("project-file-list-item"))
-        .filter(|version_item| {
-            // filter for release versions
-            version_item.find(
-                Class("project-file-release-type").descendant(Class("release-phase"))
-            ).next().is_some()
-        })
         .map(|version_item| {
             let version_name = version_item.find(
                 Class("project-file-name").descendant(Attr("data-action", "file-link"))
