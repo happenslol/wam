@@ -1,4 +1,5 @@
 extern crate select;
+extern crate chrono;
 
 use super::{Addon, AddonLock};
 use ::std::path::{Path, PathBuf};
@@ -6,11 +7,12 @@ use ::std::fs::File;
 
 use self::select::predicate::*;
 use self::select::document::Document;
+use self::chrono::prelude::*;
 
-pub fn get_lock(addon: &Addon) -> Option<AddonLock> {
+pub fn get_lock(addon: &Addon, old_lock: Option<AddonLock>) -> Option<AddonLock> {
     match addon.provider.as_str() {
         "curse" | "ace" => get_curse_lock(addon),
-        "tukui" => get_tuk_lock(addon),
+        "tukui" => get_tuk_lock(addon, old_lock),
         _ => {
             println!("unknown provider for lock get: {}", addon.provider);
             None
@@ -56,8 +58,78 @@ fn get_curse_lock(addon: &Addon) -> Option<AddonLock> {
     })
 }
 
-fn get_tuk_lock(addon: &Addon) -> Option<AddonLock> {
-    None
+fn get_tuk_lock(addon: &Addon, old_lock: Option<AddonLock>) -> Option<AddonLock> {
+    if addon.name.as_str() == "elvui" || addon.name.as_str() == "tukui" {
+        let url = format!("https://www.tukui.org/download.php?ui={}", addon.name);
+        let ui_page = ::reqwest::get(&url).unwrap().text().unwrap();
+        let doc = Document::from(ui_page.as_str());
+
+        let mut version_els = doc.find(
+            Attr("id", "version").descendant(
+                Name("b").and(Class("Premium"))
+            )
+        );
+
+        let version = version_els.next().unwrap().text();
+        let date = version_els.next().unwrap().text();
+        let date = format!("{} 00:00:00", date);
+
+        let parsed_date = Utc.datetime_from_str(&date, "%Y-%m-%d %H:%M:%S").unwrap();
+        let timestamp = parsed_date.timestamp() as u64;
+
+        Some(AddonLock {
+            name: format!("tukui/{}", addon.name),
+            resolved: addon.name.clone(),
+            version, timestamp,
+        })
+    } else {
+        let resolved_id = match old_lock {
+            Some(old) => old.resolved,
+            None => {
+                // TODO: lowercase this all
+                let search_term = addon.name.replace(" ", "+");
+                let search_url = format!("https://www.tukui.org/addons.php?search={}", search_term);
+                let search_page = ::reqwest::get(&search_url).unwrap().text().unwrap();
+
+                let doc = Document::from(search_page.as_str());
+                let result_node = doc.find(
+                    Class("addons")
+                        .and(Class("addons-list"))
+                        .descendant(Name("a"))
+                ).next().unwrap();
+
+                let href = result_node.attr("href").unwrap();
+                String::from(href.split("?id=").last().unwrap())
+            }
+        };
+
+        let version_url = format!("https://www.tukui.org/addons.php?id={}", resolved_id);
+        let version_page = ::reqwest::get(&version_url).unwrap().text().unwrap();
+        let doc = Document::from(version_page.as_str());
+
+        let mut version_els = doc.find(
+            Attr("id", "extras").descendant(
+                Name("b").and(Class("VIP"))
+            )
+        );
+
+        // TODO: why is version not there wtf
+        let _version = version_els.next().unwrap().text();
+        let date = version_els.next().unwrap().text();
+        let time = version_els.next().unwrap().text();
+
+        let version = String::from("TODO");
+        let date_str = format!("{} {}:00", date, time);
+
+        let parsed_date = Utc.datetime_from_str(&date_str, "%b %e, %Y %H:%M:%S").unwrap();
+        let timestamp = parsed_date.timestamp() as u64;
+
+        Some(AddonLock {
+            name: format!("tukui/{}", addon.name),
+            resolved: resolved_id,
+            version, timestamp,
+        })
+    }
 }
 
 pub fn has_update(addon: &Addon, lock: &AddonLock) -> (bool, Option<AddonLock>) {
@@ -71,6 +143,7 @@ pub fn has_update(addon: &Addon, lock: &AddonLock) -> (bool, Option<AddonLock>) 
     }
 }
 
+// TODO: merge these
 fn check_curse_update(addon: &Addon, lock: &AddonLock) -> (bool, Option<AddonLock>) {
     let new_lock = get_curse_lock(addon).unwrap();
     if lock.timestamp > lock.timestamp {
@@ -81,6 +154,11 @@ fn check_curse_update(addon: &Addon, lock: &AddonLock) -> (bool, Option<AddonLoc
 }
 
 fn check_tuk_update(addon: &Addon, lock: &AddonLock) -> (bool, Option<AddonLock>) {
+    let new_lock = get_tuk_lock(addon, Some(lock.clone())).unwrap();
+    if lock.timestamp > lock.timestamp {
+        return (true, Some(new_lock));
+    }
+
     (false, None)
 }
 
@@ -101,7 +179,7 @@ fn download_from_url(url: &str, dir: &Path) -> Option<PathBuf> {
     Some(path)
 }
 
-pub fn download_addon(addon: &Addon, temp_dir: &Path, addon_dir: &Path) {
+pub fn download_addon(addon: &Addon, lock: &AddonLock, temp_dir: &Path, addon_dir: &Path) {
     let file = match addon.provider.as_str() {
         "curse" | "ace" => {
             let url = format!(
@@ -117,7 +195,7 @@ pub fn download_addon(addon: &Addon, temp_dir: &Path, addon_dir: &Path) {
                 let url = get_tukui_quick_download_link(addon.name.as_str());
                 Some(download_from_url(&url, temp_dir).unwrap())
             } else {
-                let url = format!("https://www.tukui.org/addons.php?download={}", addon.name);
+                let url = format!("https://www.tukui.org/addons.php?download={}", lock.resolved);
                 let mut res = ::reqwest::get(&url).unwrap();
                 let disp_header = String::from(res.headers()["content-disposition"].to_str().unwrap());
                 let filename = disp_header.split("filename=").last().unwrap();
@@ -163,7 +241,6 @@ fn get_tukui_quick_download_link(addon: &str) -> String {
         match link.attr("href") {
             Some(href) => {
                 if href.starts_with(&dl_start) && href.ends_with(".zip") {
-                    println!("{} download link found: {}", addon, href);
                     return format!("https://www.tukui.org{}", href);
                 }
             },

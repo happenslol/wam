@@ -82,7 +82,9 @@ fn main() {
             Some(lock) => {
                 match providers::has_update(&addon, &lock) {
                     (true, Some(new_lock)) => {
-                        println!("got new lock for {}: {:?}", addon.name, new_lock);
+                        println!("got update: {:?}", new_lock);
+                        providers::download_addon(addon, &new_lock, &temp_dir, &addon_dir);
+                        new_locks.push(new_lock);
                     },
                     _ => {
                         println!("{} was up to date", addon.name);
@@ -91,10 +93,10 @@ fn main() {
                 }
             },
             None => {
-                match providers::get_lock(addon) {
+                match providers::get_lock(addon, None) {
                     Some(new_lock) => {
-                        providers::download_addon(addon, &temp_dir, &addon_dir);
-                        println!("got new lock for {}: {:?}", addon.name, new_lock);
+                        println!("downloading for first time: {:?}", new_lock);
+                        providers::download_addon(addon, &new_lock, &temp_dir, &addon_dir);
                         new_locks.push(new_lock);
                     },
                     None => {
