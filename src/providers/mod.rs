@@ -23,7 +23,12 @@ pub fn get_lock(addon: &Addon, old_lock: Option<AddonLock>) -> Option<AddonLock>
 fn get_curse_lock(addon: &Addon) -> Option<AddonLock> {
     // by sorting by release type, we get releases before alphas and avoid a problem
     // where the first page could be filled with alpha releases (thanks dbm very cool)
-    let files_url = format!("https://wow.curseforge.com/projects/{}/files?sort=releasetype", addon.name);
+    let files_url = if addon.provider == "curse" {
+        format!("https://wow.curseforge.com/projects/{}/files?sort=releasetype", addon.name)
+    } else {
+        format!("https://wowace.com/projects/{}/files?sort=releasetype", addon.name)
+    };
+
     let files_page = ::reqwest::get(&files_url).unwrap().text().unwrap();
 
     let doc = Document::from(files_page.as_str());
@@ -181,9 +186,17 @@ fn download_from_url(url: &str, dir: &Path) -> Option<PathBuf> {
 
 pub fn download_addon(addon: &Addon, lock: &AddonLock, temp_dir: &Path, addon_dir: &Path) {
     let file = match addon.provider.as_str() {
-        "curse" | "ace" => {
+        "curse" => {
             let url = format!(
                 "https://wow.curseforge.com/projects/{}/files/latest",
+                addon.name
+            );
+
+            Some(download_from_url(&url, temp_dir).unwrap())
+        },
+        "ace" => {
+            let url = format!(
+                "https://wowace.com/projects/{}/files/latest",
                 addon.name
             );
 

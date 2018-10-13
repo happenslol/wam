@@ -63,6 +63,9 @@ fn main() {
     fs::create_dir(temp_dir).expect("could not create temp dir");
 
     let addon_dir = Path::new("Interface/AddOns");
+    if !addon_dir.is_path() {
+        fs::create_dir_all(addon_dir).unwrap()
+    }
 
     let mut contents = String::new();
     f.read_to_string(&mut contents).expect("something went wrong reading the file");
@@ -95,7 +98,7 @@ fn main() {
             None => {
                 match providers::get_lock(addon, None) {
                     Some(new_lock) => {
-                        println!("downloading for first time: {:?}", new_lock);
+                        // println!("downloading for first time: {:?}", new_lock);
                         providers::download_addon(addon, &new_lock, &temp_dir, &addon_dir);
                         new_locks.push(new_lock);
                     },
