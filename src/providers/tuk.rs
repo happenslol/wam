@@ -4,9 +4,24 @@ use super::chrono::prelude::*;
 
 use ::{Addon, AddonLock};
 
+pub const ADDON_DL_URL_TEMPLATE: &'static str =
+    "https://www.tukui.org/addons.php?download={}";
+
+const UI_DL_URL_TEMPLATE: &'static str =
+    "https://www.tukui.org/download.php?ui={}";
+
+const SEARCH_URL_TEMPLATE: &'static str =
+    "https://www.tukui.org/addons.php?search={}";
+
+const ADDON_URL_TEMPLATE: &'static str =
+    "https://www.tukui.org/addons.php?id={}";
+
+const HOME_URL: &'static str = "https://www.tukui.org/welcome.php";
+const BASE_URL_TEMPLATE: &'static str = "https://www.tukui.org{}";
+
 pub fn get_lock(addon: &Addon, old_lock: Option<AddonLock>) -> Option<AddonLock> {
     if addon.name.as_str() == "elvui" || addon.name.as_str() == "tukui" {
-        let url = format!("https://www.tukui.org/download.php?ui={}", addon.name);
+        let url = UI_DL_URL_TEMPLATE.replace("{}", &addon.name);
         let ui_page = ::reqwest::get(&url).unwrap().text().unwrap();
         let doc = Document::from(ui_page.as_str());
 
@@ -34,7 +49,7 @@ pub fn get_lock(addon: &Addon, old_lock: Option<AddonLock>) -> Option<AddonLock>
             None => {
                 // TODO: lowercase this all
                 let search_term = addon.name.replace(" ", "+");
-                let search_url = format!("https://www.tukui.org/addons.php?search={}", search_term);
+                let search_url = SEARCH_URL_TEMPLATE.replace("{}", &search_term);
                 let search_page = ::reqwest::get(&search_url).unwrap().text().unwrap();
 
                 let doc = Document::from(search_page.as_str());
@@ -49,7 +64,7 @@ pub fn get_lock(addon: &Addon, old_lock: Option<AddonLock>) -> Option<AddonLock>
             }
         };
 
-        let version_url = format!("https://www.tukui.org/addons.php?id={}", resolved_id);
+        let version_url = ADDON_URL_TEMPLATE.replace("{}", &resolved_id);
         let version_page = ::reqwest::get(&version_url).unwrap().text().unwrap();
         let doc = Document::from(version_page.as_str());
 
@@ -79,9 +94,7 @@ pub fn get_lock(addon: &Addon, old_lock: Option<AddonLock>) -> Option<AddonLock>
 }
 
 pub fn get_quick_download_link(addon: &str) -> String {
-    let homepage_body = ::reqwest::get("https://www.tukui.org/welcome.php")
-        .unwrap().text().unwrap();
-
+    let homepage_body = ::reqwest::get(HOME_URL).unwrap().text().unwrap();
     let doc = Document::from(homepage_body.as_str());
     let dl_start = format!("/downloads/{}", addon);
 
@@ -89,7 +102,7 @@ pub fn get_quick_download_link(addon: &str) -> String {
         match link.attr("href") {
             Some(href) => {
                 if href.starts_with(&dl_start) && href.ends_with(".zip") {
-                    return format!("https://www.tukui.org{}", href);
+                    return BASE_URL_TEMPLATE.replace("{}", &href);
                 }
             },
             _ => {},

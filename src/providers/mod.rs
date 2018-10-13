@@ -30,37 +30,32 @@ pub fn has_update(addon: &Addon, lock: &AddonLock) -> (bool, Option<AddonLock>) 
 
 pub fn download_addon(addon: &Addon, lock: &AddonLock, temp_dir: &Path, addon_dir: &Path) {
     let file = match addon.provider.as_str() {
-        "curse" => {
-            let url = format!(
-                "https://wow.curseforge.com/projects/{}/files/latest",
-                addon.name
-            );
-
-            download_direct(&url, temp_dir)
-        },
-        "ace" => {
-            let url = format!(
-                "https://wowace.com/projects/{}/files/latest",
-                addon.name
-            );
-
-            download_direct(&url, temp_dir)
-        },
+        "curse" => download_direct(
+            &curse::CURSE_DL_URL_TEMPLATE.replace("{}", &addon.name),
+            temp_dir
+        ),
+        "ace" => download_direct(
+            &curse::ACE_DL_URL_TEMPLATE.replace("{}", &addon.name),
+            temp_dir
+        ),
         "tukui" => {
             // check we're getting tukui or elvui, those are "special"
             if addon.name.as_str() == "elvui" || addon.name.as_str() == "tukui" {
-                let url = tuk::get_quick_download_link(addon.name.as_str());
-                download_direct(&url, temp_dir)
+                download_direct(
+                    &tuk::get_quick_download_link(addon.name.as_str()),
+                    temp_dir
+                )
             } else {
-                let url = format!("https://www.tukui.org/addons.php?download={}", lock.resolved);
-                download_attachment(&url, temp_dir)
+                download_attachment(
+                    &tuk::ADDON_DL_URL_TEMPLATE.replace("{}", &lock.resolved),
+                    temp_dir
+                )
             }
         },
         _ => {
             println!(
                 "unknown provider for addon {}: {}",
-                addon.name,
-                addon.provider
+                addon.name, addon.provider
             );
 
             None
