@@ -199,77 +199,215 @@ impl Future for AddonDownloadFuture {
     }
 }
 
-pub fn get_lock(addon: &Addon, old_lock: Option<AddonLock>) -> Option<AddonLock> {
-    if addon.name.as_str() == "elvui" || addon.name.as_str() == "tukui" {
-        let url = UI_DL_URL_TEMPLATE.replace("{}", &addon.name);
-        let ui_page = ::reqwest::get(&url).unwrap().text().unwrap();
-        let doc = Document::from(ui_page.as_str());
+pub struct TukLockFuture {
+    inner: LockInner,
+}
 
-        let mut version_els = doc.find(
-            Attr("id", "version").descendant(
-                Name("b").and(Class("Premium"))
-            )
-        );
+pub fn get_lock(addon: Addon, old_lock: Option<AddonLock>) -> TukLockFuture {
+    let name = addon.name.clone();
+    let client = Client::new();
 
-        let version = version_els.next().unwrap().text();
-        let date = version_els.next().unwrap().text();
-        let date = format!("{} 00:00:00", date);
+    let inner = match name.as_str() {
+        "tukui" | "elvui" => {
+            let url = UI_DL_URL_TEMPLATE.replace("{}", &addon.name);
+            let pending = client.get(&url).send();
+            let inner = HomeLockInner::Downloading(Box::new(pending));
 
-        let parsed_date = Utc.datetime_from_str(&date, "%Y-%m-%d %H:%M:%S").unwrap();
-        let timestamp = parsed_date.timestamp() as u64;
+            LockInner::HomeLockFuture(HomeLockFuture {
+                inner, addon,
+            })
+        },
+        _ => {
+            if let Some(old_lock) = old_lock {
+                let resolved = old_lock.resolved.clone();
+                let url = ADDON_DL_URL_TEMPLATE.replace("{}", &addon.name);
+                let pending = client.get(&url).send();
+                let inner = AddonLockInner::Downloading(Box::new(pending));
 
-        Some(AddonLock {
-            name: format!("tukui/{}", addon.name),
-            resolved: addon.name.clone(),
-            version, timestamp,
-        })
+                LockInner::AddonLockFuture(AddonLockFuture {
+                    inner, client, addon,
+                    resolved: Some(resolved),
+                })
+            } else {
+                let url = SEARCH_URL_TEMPLATE.replace("{}", &addon.name);
+                let pending = client.get(&url).send();
+                let inner = AddonLockInner::Resolving(Box::new(pending));
 
-    } else {
-        let resolved_id = match old_lock {
-            Some(old) => old.resolved,
-            None => {
-                // TODO: lowercase this all
-                let search_term = addon.name.replace(" ", "+");
-                let search_url = SEARCH_URL_TEMPLATE.replace("{}", &search_term);
-                let search_page = ::reqwest::get(&search_url).unwrap().text().unwrap();
-
-                let doc = Document::from(search_page.as_str());
-                let result_node = doc.find(
-                    Class("addons")
-                        .and(Class("addons-list"))
-                        .descendant(Name("a"))
-                ).next().unwrap();
-
-                let href = result_node.attr("href").unwrap();
-                String::from(href.split("?id=").last().unwrap())
+                LockInner::AddonLockFuture(AddonLockFuture {
+                    inner, client, addon,
+                    resolved: None,
+                })
             }
-        };
+        },
+    };
 
-        let version_url = ADDON_URL_TEMPLATE.replace("{}", &resolved_id);
-        let version_page = ::reqwest::get(&version_url).unwrap().text().unwrap();
-        let doc = Document::from(version_page.as_str());
+    TukLockFuture { inner }
+}
 
-        let mut version_els = doc.find(
-            Attr("id", "extras").descendant(
-                Name("b").and(Class("VIP"))
-            )
-        );
+impl Future for TukLockFuture {
+    type Item = (Addon, AddonLock);
+    type Error = String;
 
-        // TODO: why is version not there wtf
-        let _version = version_els.next().unwrap().text();
-        let date = version_els.next().unwrap().text();
-        let time = version_els.next().unwrap().text();
+    fn poll(&mut self) -> Result<Async<(Addon, AddonLock)>, String> {
+        use self::LockInner::*;
 
-        let version = String::from("TODO");
-        let date_str = format!("{} {}:00", date, time);
+        match self.inner {
+            HomeLockFuture(ref mut f) => f.poll(),
+            AddonLockFuture(ref mut f) => f.poll(),
+        }
+    }
+}
 
-        let parsed_date = Utc.datetime_from_str(&date_str, "%b %e, %Y %H:%M:%S").unwrap();
-        let timestamp = parsed_date.timestamp() as u64;
+enum LockInner {
+    HomeLockFuture(HomeLockFuture),
+    AddonLockFuture(AddonLockFuture),
+}
 
-        Some(AddonLock {
-            name: format!("tukui/{}", addon.name),
-            resolved: resolved_id,
-            version, timestamp,
-        })
+struct HomeLockFuture {
+    inner: HomeLockInner,
+    addon: Addon,
+}
+
+enum HomeLockInner {
+    Downloading(Box<Future<Item = Response, Error = ReqwestError> + Send>),
+    DownloadingBody(Concat2<Decoder>),
+}
+
+impl Future for HomeLockFuture {
+    type Item = (Addon, AddonLock);
+    type Error = String;
+
+    fn poll(&mut self) -> Result<Async<(Addon, AddonLock)>, String> {
+        use self::HomeLockInner::*;
+
+        loop {
+            let next = match self.inner {
+                Downloading(ref mut f) => {
+                    let res = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                    DownloadingBody(res.into_body().concat2())
+                },
+                DownloadingBody(ref mut f) => {
+                    let body = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                    let page = String::from_utf8(body.to_vec()).unwrap();
+                    let doc = Document::from(page.as_str());
+
+                    let mut version_els = doc.find(
+                        Attr("id", "version").descendant(
+                            Name("b").and(Class("Premium"))
+                        )
+                    );
+
+                    let version = version_els.next().unwrap().text();
+                    let date = version_els.next().unwrap().text();
+                    let date = format!("{} 00:00:00", date);
+
+                    let parsed_date = Utc.datetime_from_str(&date, "%Y-%m-%d %H:%M:%S").unwrap();
+                    let timestamp = parsed_date.timestamp() as u64;
+
+                    let result = AddonLock {
+                        name: format!("tukui/{}", self.addon.name),
+                        resolved: self.addon.name.clone(),
+                        version, timestamp,
+                    };
+
+                    return Ok(Async::Ready((self.addon.clone(), result)));
+                },
+            };
+
+            self.inner = next;
+        }
+    }
+}
+
+struct AddonLockFuture {
+    inner: AddonLockInner,
+    addon: Addon,
+    client: Client,
+    resolved: Option<String>,
+}
+
+enum AddonLockInner {
+    Resolving(Box<Future<Item = Response, Error = ReqwestError> + Send>),
+    ResolvingBody(Concat2<Decoder>),
+    Downloading(Box<Future<Item = Response, Error = ReqwestError> + Send>),
+    DownloadingBody(Concat2<Decoder>),
+}
+
+impl Future for AddonLockFuture {
+    type Item = (Addon, AddonLock);
+    type Error = String;
+
+    fn poll(&mut self) -> Result<Async<(Addon, AddonLock)>, String> {
+        use self::AddonLockInner::*;
+
+        loop {
+            let next = match self.inner {
+                Resolving(ref mut f) => {
+                    let res = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                    ResolvingBody(res.into_body().concat2())
+                },
+                ResolvingBody(ref mut f) => {
+                    let body = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                    let page = String::from_utf8(body.to_vec()).unwrap();
+
+                    // TODO: lowercase this all
+                    // let search_term = addon.name.replace(" ", "+");
+                    // let search_url = SEARCH_URL_TEMPLATE.replace("{}", &search_term);
+                    // let search_page = ::reqwest::get(&search_url).unwrap().text().unwrap();
+
+                    let doc = Document::from(page.as_str());
+                    let result_node = doc.find(
+                        Class("addons")
+                            .and(Class("addons-list"))
+                            .descendant(Name("a"))
+                    ).next().unwrap();
+
+                    let href = result_node.attr("href").unwrap();
+                    let resolved = String::from(href.split("?id=").last().unwrap());
+
+                    let addon_url = ADDON_URL_TEMPLATE.replace("{}", &resolved);
+                    let pending = self.client.get(&addon_url).send();
+                    self.resolved = Some(resolved);
+
+                    Downloading(Box::new(pending))
+                },
+                Downloading(ref mut f) => {
+                    let res = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                    DownloadingBody(res.into_body().concat2())
+                },
+                DownloadingBody(ref mut f) => {
+                    let body = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                    let page = String::from_utf8(body.to_vec()).unwrap();
+                    let doc = Document::from(page.as_str());
+
+                    let mut version_els = doc.find(
+                        Attr("id", "extras").descendant(
+                            Name("b").and(Class("VIP"))
+                        )
+                    );
+
+                    // TODO: why is version not there wtf
+                    let _version = version_els.next().unwrap().text();
+                    let date = version_els.next().unwrap().text();
+                    let time = version_els.next().unwrap().text();
+
+                    let version = String::from("TODO");
+                    let date_str = format!("{} {}:00", date, time);
+
+                    let parsed_date = Utc.datetime_from_str(&date_str, "%b %e, %Y %H:%M:%S").unwrap();
+                    let timestamp = parsed_date.timestamp() as u64;
+
+                    let result = AddonLock {
+                        name: format!("tukui/{}", self.addon.name),
+                        resolved: self.resolved.take().unwrap(),
+                        version, timestamp,
+                    };
+
+                    return Ok(Async::Ready((self.addon.clone(), result)));
+                },
+            };
+
+            self.inner = next;
+        }
     }
 }

@@ -9,8 +9,8 @@ use ::std::path::PathBuf;
 
 use ::futures::{Future, Async};
 
-use self::tuk::TukDownloadFuture;
-use self::curse::{CurseLockFuture, CurseDownloadFuture};
+use self::tuk::{TukDownloadFuture, TukLockFuture};
+use self::curse::{CurseDownloadFuture, CurseLockFuture};
 
 pub struct AddonLockFuture {
     inner: LockInner,
@@ -18,7 +18,7 @@ pub struct AddonLockFuture {
 
 enum LockInner {
     CurseLockFuture(CurseLockFuture),
-    // TukLockFuture(TukLockFuture),
+    TukLockFuture(TukLockFuture),
 }
 
 impl Future for AddonLockFuture {
@@ -30,7 +30,7 @@ impl Future for AddonLockFuture {
 
         match self.inner {
             CurseLockFuture(ref mut f) => f.poll(),
-            // TukLockFuture(ref mut f) => f.poll(),
+            TukLockFuture(ref mut f) => f.poll(),
         }
     }
 }
@@ -47,7 +47,13 @@ pub fn get_lock(
 
             Some(AddonLockFuture { inner })
         },
-        // "tukui" => tuk::get_lock(addon, old_lock),
+        "tukui" => {
+            let inner = LockInner::TukLockFuture(
+                tuk::get_lock(addon.clone(), old_lock)
+            );
+
+            Some(AddonLockFuture { inner })
+        },
         _ => None,
     }
 }
