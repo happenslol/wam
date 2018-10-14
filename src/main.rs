@@ -105,26 +105,15 @@ fn install() -> Result<(), Box<Error>> {
 
     let install_future = futures::stream::iter_ok::<_, String>(parsed.addons)
         .filter_map(move |addon| {
-            println!("processing {}", addon.name);
-            let found = LOCK.addons.iter().find(|it| {
-                // addons are unique over their name and provider
-                format!("{}/{}", addon.provider, addon.name) == it.name
-            });
-
-            let addon_lock = match found {
-                Some(found) => Some(found.clone()),
-                _ => providers::get_lock(&addon, None),
-            };
-
-            match addon_lock {
-                Some(addon_lock) => providers::download_addon(
-                    &addon,
-                    &addon_lock
-                ),
-                _ => panic!("error"),
-            }
+            println!("getting lock for {}", addon.name);
+            providers::get_lock(&addon, None)
         })
-        .buffer_unordered(8)
+        .buffer_unordered(5)
+        .filter_map(move |(addon, lock)| {
+            println!("downloading {}", addon.name);
+            providers::download_addon(&addon, &lock)
+        })
+        .buffer_unordered(5)
         .map(move |(downloaded, lock)| {
             println!("downloaded {}, extracting...", lock.name);
             extract::extract_zip(downloaded, addon_dir.to_path_buf());

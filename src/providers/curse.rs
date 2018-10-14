@@ -17,6 +17,8 @@ pub const CURSE_DL_URL_TEMPLATE: &'static str =
 pub const ACE_DL_URL_TEMPLATE: &'static str =
     "https://wowace.com/projects/{}/files/latest";
 
+// by sorting by release type, we get releases before alphas and avoid a problem
+// where the first page could be filled with alpha releases (thanks dbm very cool)
 const CURSE_FILES_URL_TEMPLATE: &'static str =
     "https://wow.curseforge.com/projects/{}/files?sort=releasetype";
 
@@ -86,39 +88,81 @@ impl Future for CurseDownloadFuture {
     }
 }
 
-pub fn get_lock(addon: &Addon) -> Option<AddonLock> {
-    // by sorting by release type, we get releases before alphas and avoid a problem
-    // where the first page could be filled with alpha releases (thanks dbm very cool)
-    let files_url = if addon.provider == "curse" {
-        CURSE_FILES_URL_TEMPLATE.replace("{}", &addon.name)
-    } else {
-        ACE_FILES_URL_TEMPLATE.replace("{}", &addon.name)
-    };
+pub struct CurseLockFuture {
+    inner: LockInner,
+    addon: Addon,
+}
 
-    let files_page = ::reqwest::get(&files_url).unwrap().text().unwrap();
+enum LockInner {
+    Downloading(Box<Future<Item = Response, Error = ReqwestError> + Send>),
+    DownloadingBody(Concat2<Decoder>),
+}
 
-    let doc = Document::from(files_page.as_str());
+impl CurseLockFuture {
+    pub fn new(addon: Addon) -> CurseLockFuture {
+        let client = Client::new();
 
-    let (version, timestamp) = doc.find(Class("project-file-list-item"))
-        .map(|version_item| {
-            let version_name = version_item.find(
-                Class("project-file-name").descendant(Attr("data-action", "file-link"))
-            ).next().unwrap().text();
+        let url = if addon.provider == "curse" {
+            CURSE_FILES_URL_TEMPLATE.replace("{}", &addon.name)
+        } else {
+            ACE_FILES_URL_TEMPLATE.replace("{}", &addon.name)
+        };
 
-            let uploaded_abbr = version_item.find(
-                Class("project-file-date-uploaded").descendant(Name("abbr"))
-            ).next().unwrap();
+        let pending = client.get(&url).send();
+        let inner = LockInner::Downloading(Box::new(pending));
 
-            let uploaded_epoch = uploaded_abbr.attr("data-epoch").unwrap();
-            (String::from(version_name), uploaded_epoch.parse::<u64>().unwrap())
-        })
-        .max_by_key(|item| item.1).unwrap();
+        CurseLockFuture { inner, addon }
+    }
+}
 
-    Some(AddonLock {
-        // for curse, addon name and resolved are the same since they have
-        // proper unique identifiers
-        name: format!("{}/{}", addon.provider, addon.name),
-        resolved: addon.name.clone(),
-        version, timestamp,
-    })
+impl Future for CurseLockFuture {
+    type Item = (Addon, AddonLock);
+    type Error = String;
+
+    fn poll(&mut self) -> Result<Async<(Addon, AddonLock)>, String> {
+        use self::LockInner::*;
+
+        loop {
+            let next = match self.inner {
+                Downloading(ref mut f) => {
+                    let res = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                    DownloadingBody(res.into_body().concat2())
+                },
+                DownloadingBody(ref mut f) => {
+                    let body = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                    let files_page = String::from_utf8(body.to_vec()).unwrap();
+
+                    let doc = Document::from(files_page.as_str());
+
+                    let (version, timestamp) = doc.find(Class("project-file-list-item"))
+                        .map(|version_item| {
+                            let version_name = version_item.find(
+                                Class("project-file-name").descendant(Attr("data-action", "file-link"))
+                            ).next().unwrap().text();
+
+                            let uploaded_abbr = version_item.find(
+                                Class("project-file-date-uploaded").descendant(Name("abbr"))
+                            ).next().unwrap();
+
+                            let uploaded_epoch = uploaded_abbr.attr("data-epoch").unwrap();
+                            (String::from(version_name), uploaded_epoch.parse::<u64>().unwrap())
+                        })
+                        .max_by_key(|item| item.1).unwrap();
+
+                    let result = AddonLock {
+                        // for curse, addon name and resolved are the same since they have
+                        // proper unique identifiers
+                        name: format!("{}/{}", self.addon.provider, self.addon.name),
+                        resolved: self.addon.name.clone(),
+                        version, timestamp,
+                    };
+
+                    println!("got curse lock: {:?}", result);
+                    return Ok(Async::Ready((self.addon.clone(), result)));
+                },
+            };
+
+            self.inner = next;
+        }
+    }
 }

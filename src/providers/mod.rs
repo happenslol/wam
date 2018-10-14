@@ -10,27 +10,53 @@ use ::std::path::PathBuf;
 use ::futures::{Future, Async};
 
 use self::tuk::TukDownloadFuture;
-use self::curse::CurseDownloadFuture;
+use self::curse::{CurseLockFuture, CurseDownloadFuture};
 
-pub fn get_lock(
-    addon: &Addon,
-    old_lock: Option<AddonLock>
-) -> Option<AddonLock> {
-    match addon.provider.as_str() {
-        "curse" | "ace" => curse::get_lock(addon),
-        "tukui" => tuk::get_lock(addon, old_lock),
-        _ => {
-            println!("unknown provider for lock get: {}", addon.provider);
-            None
+pub struct AddonLockFuture {
+    inner: LockInner,
+}
+
+enum LockInner {
+    CurseLockFuture(CurseLockFuture),
+    // TukLockFuture(TukLockFuture),
+}
+
+impl Future for AddonLockFuture {
+    type Item = (Addon, AddonLock);
+    type Error = String;
+
+    fn poll(&mut self) -> Result<Async<(Addon, AddonLock)>, String> {
+        use self::LockInner::*;
+
+        match self.inner {
+            CurseLockFuture(ref mut f) => f.poll(),
+            // TukLockFuture(ref mut f) => f.poll(),
         }
     }
 }
 
-pub struct DownloadAddonFuture {
-    inner: Inner,
+pub fn get_lock(
+    addon: &Addon,
+    old_lock: Option<AddonLock>
+) -> Option<AddonLockFuture> {
+    match addon.provider.as_str() {
+        "curse" | "ace" => {
+            let inner = LockInner::CurseLockFuture(
+                curse::CurseLockFuture::new(addon.clone())
+            );
+
+            Some(AddonLockFuture { inner })
+        },
+        // "tukui" => tuk::get_lock(addon, old_lock),
+        _ => None,
+    }
 }
 
-enum Inner {
+pub struct DownloadAddonFuture {
+    inner: DownloadInner,
+}
+
+enum DownloadInner {
     CurseDownloadFuture(CurseDownloadFuture),
     TukDownloadFuture(TukDownloadFuture),
 }
@@ -40,7 +66,7 @@ impl Future for DownloadAddonFuture {
     type Error = String;
 
     fn poll(&mut self) -> Result<Async<(PathBuf, AddonLock)>, String> {
-        use self::Inner::*;
+        use self::DownloadInner::*;
 
         match self.inner {
             CurseDownloadFuture(ref mut f) => f.poll(),
@@ -55,12 +81,12 @@ pub fn download_addon(
     let provider = addon.provider.clone();
     let inner = match provider.as_str() {
         "curse" | "ace" => {
-            Inner::CurseDownloadFuture(CurseDownloadFuture::new(
+            DownloadInner::CurseDownloadFuture(CurseDownloadFuture::new(
                 lock.clone(), addon.clone()
             ))
         },
         "tukui" => {
-            Inner::TukDownloadFuture(TukDownloadFuture::new(
+            DownloadInner::TukDownloadFuture(TukDownloadFuture::new(
                 lock.clone(), addon.clone()
             ))
         }
