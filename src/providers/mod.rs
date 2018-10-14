@@ -5,14 +5,18 @@ mod tuk;
 mod curse;
 
 use super::{Addon, AddonLock};
-use ::std::path::{Path, PathBuf};
+use ::std::path::PathBuf;
 use ::std::fs::File;
 
-use ::std::io::{self, Write};
-use ::hyper::Client;
-use ::futures::{Future, Stream};
+use ::std::io::Write;
+use ::futures::{Future, Stream, Async};
 
-pub fn get_lock(addon: &Addon, old_lock: Option<AddonLock>) -> Option<AddonLock> {
+use self::tuk::TukDownloadFuture;
+
+pub fn get_lock(
+    addon: &Addon,
+    old_lock: Option<AddonLock>
+) -> Option<AddonLock> {
     match addon.provider.as_str() {
         "curse" | "ace" => curse::get_lock(addon),
         "tukui" => tuk::get_lock(addon, old_lock),
@@ -23,56 +27,74 @@ pub fn get_lock(addon: &Addon, old_lock: Option<AddonLock>) -> Option<AddonLock>
     }
 }
 
-pub fn has_update(addon: &Addon, lock: &AddonLock) -> (bool, Option<AddonLock>) {
-    let new_lock = get_lock(addon, Some(lock.clone())).unwrap();
-    if new_lock.timestamp > lock.timestamp {
-        return (true, Some(new_lock));
-    }
+pub struct DownloadAddonFuture {
+    inner: Inner,
+}
 
-    (false, None)
+enum Inner {
+    // CurseDownloadFuture(CurseDownloadFuture),
+    TukDownloadFuture(TukDownloadFuture),
+}
+
+impl Future for DownloadAddonFuture {
+    type Item = (PathBuf, AddonLock);
+    type Error = String;
+
+    fn poll(&mut self) -> Result<Async<(PathBuf, AddonLock)>, String> {
+        use self::Inner::*;
+
+        match self.inner {
+            // CurseDownloadFuture(f) => f.poll(),
+            TukDownloadFuture(ref mut f) => f.poll(),
+        }
+    }
 }
 
 pub fn download_addon(
     addon: &Addon, lock: &AddonLock,
     temp_dir: PathBuf
-) -> impl Future<Item = (PathBuf, AddonLock), Error = ()> {
-    let download_link = match addon.provider.as_str() {
-        "curse" => curse::CURSE_DL_URL_TEMPLATE.replace("{}", &addon.name),
-        "ace" => curse::ACE_DL_URL_TEMPLATE.replace("{}", &addon.name),
-        "tukui" => match addon.name.as_str() {
-            // check we're getting tukui or elvui, those are "special"
-            "elvui" | "tukui" => tuk::get_quick_download_link(addon.name.as_str()),
-            _ => tuk::ADDON_DL_URL_TEMPLATE.replace("{}", &lock.resolved)
-        },
-        _ => panic!("unknown provider: {}", addon.provider),
-    };
+) -> DownloadAddonFuture {
+    let tuk_future = TukDownloadFuture::new(lock.clone(), addon.clone());
+    DownloadAddonFuture {
+        inner: Inner::TukDownloadFuture(tuk_future),
+    }
 
-    let client = ::reqwest::async::Client::new();
-    let temp_dir = temp_dir.clone();
+    // let download_link = match addon.provider.as_str() {
+    //     "curse" => curse::CURSE_DL_URL_TEMPLATE.replace("{}", &addon.name),
+    //     "ace" => curse::ACE_DL_URL_TEMPLATE.replace("{}", &addon.name),
+    //     "tukui" => match addon.name.as_str() {
+    //         // check we're getting tukui or elvui, those are "special"
+    //         "elvui" | "tukui" => tuk::get_quick_download_link(addon.name.as_str()),
+    //         _ => tuk::ADDON_DL_URL_TEMPLATE.replace("{}", &lock.resolved)
+    //     },
+    //     _ => panic!("unknown provider: {}", addon.provider),
+    // };
 
-    let lock = lock.clone();
-    client.get(&download_link).send()
-        .map_err(|err| println!("error: {}", err))
-        .and_then(move |res| {
-            let filename = if let Some(disp_header) = res.headers().get("content-disposition") {
-                let disp_header = String::from(disp_header.to_str().unwrap());
-                String::from(disp_header.split("filename=").last().unwrap())
-            } else {
-                let final_url = String::from(res.url().as_str());
-                String::from(final_url.split("/").last().unwrap())
-            };
+    // let temp_dir = temp_dir.clone();
 
-            let path = temp_dir.join(&filename);
-            let mut file = File::create(&path).expect("could not create file");
-            res.into_body()
-                .map_err(|err| println!("error: {}", err))
-                .for_each(move |chunk| {
-                    file
-                        .write_all(&chunk)
-                        .map_err(|err| println!("couldnt write: {}", err))
-                })
-                .then(|_| Ok((path, lock)))
-        })
+    // let lock = lock.clone();
+    // CLIENT.get(&download_link).send()
+    //     .map_err(|err| println!("error: {}", err))
+    //     .and_then(move |res| {
+    //         let filename = if let Some(disp_header) = res.headers().get("content-disposition") {
+    //             let disp_header = String::from(disp_header.to_str().unwrap());
+    //             String::from(disp_header.split("filename=").last().unwrap())
+    //         } else {
+    //             let final_url = String::from(res.url().as_str());
+    //             String::from(final_url.split("/").last().unwrap())
+    //         };
+
+    //         let path = temp_dir.join(&filename);
+    //         let mut file = File::create(&path).expect("could not create file");
+    //         res.into_body()
+    //             .map_err(|err| println!("error: {}", err))
+    //             .for_each(move |chunk| {
+    //                 file
+    //                     .write_all(&chunk)
+    //                     .map_err(|err| println!("couldnt write: {}", err))
+    //             })
+    //             .then(|_| Ok((path, lock)))
+    //     })
 
     // match file {
     //     Some(file) => super::extract::extract_zip(&file, &addon_dir),

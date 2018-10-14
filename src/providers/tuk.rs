@@ -3,6 +3,14 @@ use super::select::document::Document;
 use super::chrono::prelude::*;
 
 use ::{Addon, AddonLock};
+use ::futures::{Future, Async, Stream};
+use ::futures::stream::Concat2;
+use ::std::path::{Path, PathBuf};
+use ::std::fs::File;
+use ::std::io::Write;
+
+use ::reqwest::Error as ReqwestError;
+use ::reqwest::async::{Body, Response, Decoder, Client};
 
 pub const ADDON_DL_URL_TEMPLATE: &'static str =
     "https://www.tukui.org/addons.php?download={}";
@@ -18,6 +26,130 @@ const ADDON_URL_TEMPLATE: &'static str =
 
 const HOME_URL: &'static str = "https://www.tukui.org/welcome.php";
 const BASE_URL_TEMPLATE: &'static str = "https://www.tukui.org{}";
+
+pub struct TukDownloadFuture {
+    inner: Inner,
+}
+
+impl Future for TukDownloadFuture {
+    type Item = (PathBuf, AddonLock);
+    type Error = String;
+
+    fn poll(&mut self) -> Result<Async<(PathBuf, AddonLock)>, String> {
+        use self::Inner::*;
+
+        match self.inner {
+            HomeDownloadFuture(ref mut f) => f.poll(),
+            // AddonDownloadFuture(f) => f.poll(),
+        }
+    }
+}
+
+impl TukDownloadFuture {
+    pub fn new(lock: AddonLock, addon: Addon) -> TukDownloadFuture {
+        let client = Client::new();
+        let pending = client.get(HOME_URL).send();
+        let inner = HomeDownloadInner::GettingDownloadLink(Box::new(pending));
+
+        let result = HomeDownloadFuture {
+            inner, lock,
+            filename: None,
+            addon,
+            client,
+        };
+
+        TukDownloadFuture {
+            inner: Inner::HomeDownloadFuture(result),
+        }
+    }
+}
+
+enum Inner {
+    HomeDownloadFuture(HomeDownloadFuture),
+    // AddonDownloadFuture(AddonDownloadFuture),
+}
+
+struct HomeDownloadFuture {
+    client: Client,
+    inner: HomeDownloadInner,
+    lock: AddonLock,
+    filename: Option<String>,
+    addon: Addon,
+}
+
+enum HomeDownloadInner {
+    GettingDownloadLink(Box<Future<Item = Response, Error = ReqwestError> + Send>),
+    GettingDownloadLinkBody(Concat2<Decoder>),
+    Downloading(Box<Future<Item = Response, Error = ReqwestError> + Send>),
+    DownloadingBody(Concat2<Decoder>),
+}
+
+impl Future for HomeDownloadFuture {
+    type Item = (PathBuf, AddonLock);
+    type Error = String;
+
+    fn poll(&mut self) -> Result<Async<(PathBuf, AddonLock)>, String> {
+        use self::HomeDownloadInner::*;
+
+        loop {
+            let new_inner = match self.inner {
+                GettingDownloadLink(ref mut f) => {
+                    let res = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                    GettingDownloadLinkBody(res.into_body().concat2())
+                },
+                GettingDownloadLinkBody(ref mut f) => {
+                    let homepage = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                    let homepage = String::from_utf8(homepage.to_vec()).unwrap();
+
+                    let doc = Document::from(homepage.as_str());
+                    let dl_start = format!("/downloads/{}", self.addon.name);
+
+                    let mut url = None;
+                    for link in doc.find(Name("a")) {
+                        match link.attr("href") {
+                            Some(href) => {
+                                if href.starts_with(&dl_start) && href.ends_with(".zip") {
+                                    let filename = href.split("/").last().unwrap();
+                                    self.filename = Some(String::from(filename));
+                                    url = Some(BASE_URL_TEMPLATE.replace("{}", &href));
+                                }
+                            },
+                            _ => {},
+                        };
+                    }
+
+                    println!("downloading from url: {:?}", url);
+                    let pending = self.client.get(&url.unwrap()).send();
+                    Downloading(Box::new(pending))
+                },
+                Downloading(ref mut f) => {
+                    let res = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                    DownloadingBody(res.into_body().concat2())
+                },
+                DownloadingBody(ref mut f) => {
+                    let body = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                    let filename = self.filename.take().unwrap();
+                    let filepath = Path::new(&".wam-temp").join(&filename);
+                    let mut file = File::create(&filepath).expect("could not create file");
+                    file.write_all(&body).expect("could not write to file");
+
+                    println!("returning ready!");
+                    return Ok(Async::Ready((filepath, self.lock.clone())));
+                },
+            };
+
+            self.inner = new_inner;
+        }
+    }
+}
+
+// struct AddonDownloadFuture {
+//     inner: Pending,
+// }
+
+// impl Future for AddonDownloadFuture {
+
+// }
 
 pub fn get_lock(addon: &Addon, old_lock: Option<AddonLock>) -> Option<AddonLock> {
     if addon.name.as_str() == "elvui" || addon.name.as_str() == "tukui" {
@@ -43,6 +175,7 @@ pub fn get_lock(addon: &Addon, old_lock: Option<AddonLock>) -> Option<AddonLock>
             resolved: addon.name.clone(),
             version, timestamp,
         })
+
     } else {
         let resolved_id = match old_lock {
             Some(old) => old.resolved,
@@ -95,19 +228,5 @@ pub fn get_lock(addon: &Addon, old_lock: Option<AddonLock>) -> Option<AddonLock>
 
 pub fn get_quick_download_link(addon: &str) -> String {
     let homepage_body = ::reqwest::get(HOME_URL).unwrap().text().unwrap();
-    let doc = Document::from(homepage_body.as_str());
-    let dl_start = format!("/downloads/{}", addon);
-
-    for link in doc.find(Name("a")) {
-        match link.attr("href") {
-            Some(href) => {
-                if href.starts_with(&dl_start) && href.ends_with(".zip") {
-                    return BASE_URL_TEMPLATE.replace("{}", &href);
-                }
-            },
-            _ => {},
-        };
-    }
-
     String::from("")
 }

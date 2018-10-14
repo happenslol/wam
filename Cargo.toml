@@ -14,5 +14,5 @@ chrono = "0.4"
 clap = {version = "2.32", features = ["yaml"]}
 futures = "0.1"
 tokio = "0.1"
-hyper = "0.12"
 tokio-tls = "0.2.0"
+lazy_static = "1.1.0"

@@ -1,13 +1,17 @@
 #[macro_use]
 extern crate serde_derive;
 
+#[macro_use]
+extern crate lazy_static;
+
 extern crate reqwest;
 extern crate serde;
 extern crate toml;
 
+#[macro_use]
 extern crate futures;
+
 extern crate tokio;
-extern crate hyper;
 extern crate tokio_tls;
 
 #[macro_use]
@@ -21,15 +25,14 @@ use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::io::prelude::*;
 use std::error::Error;
-use std::sync::Arc;
 
 use futures::{Future, Stream};
 
 const TEMP_DIR: &'static str = ".wam-temp";
 const ADDONS_DIR: &'static str = "Interface/Addons";
 
-const CONFIG_FILE: &'static str = "wam.toml";
-const LOCK_FILE: &'static str = "wam-lock.toml";
+const CONFIG_FILE_PATH: &'static str = "wam.toml";
+const LOCK_FILE_PATH: &'static str = "wam-lock.toml";
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ConfigFile {
@@ -57,6 +60,23 @@ pub struct AddonLock {
     pub timestamp: u64,
 }
 
+lazy_static! {
+    static ref LOCK: LockFile = {
+        let lock_path = Path::new(LOCK_FILE_PATH);
+
+        if !lock_path.exists() || !lock_path.is_file() {
+            LockFile { addons: Vec::new() }
+        } else {
+            let mut contents = String::new();
+            let mut f = File::open(lock_path).unwrap();
+            f.read_to_string(&mut contents).unwrap();
+            drop(f);
+            toml::from_str::<LockFile>(&contents)
+                .expect("failed to parse lock file")
+        }
+    };
+}
+
 fn main() {
     let cli_yaml = load_yaml!("cli.yml");
     let matches = App::from_yaml(cli_yaml)
@@ -70,24 +90,14 @@ fn main() {
         };
     }
 
-    // let _ = delete_temp_dir();
+    delete_temp_dir().unwrap();
 }
 
 fn install() -> Result<(), Box<Error>> {
-    let mut f = File::open(CONFIG_FILE)?;
+    let mut f = File::open(CONFIG_FILE_PATH)?;
     let mut contents = String::new();
     f.read_to_string(&mut contents)?;
     let parsed: ConfigFile = toml::from_str(&contents)?;
-
-    let lock_path = Path::new(LOCK_FILE);
-    let lock = if !lock_path.exists() || !lock_path.is_file() {
-        LockFile { addons: Vec::new() }
-    } else {
-        let mut contents = String::new();
-        let mut f = File::open(lock_path)?;
-        f.read_to_string(&mut contents)?;
-        toml::from_str::<LockFile>(&contents)?
-    };
 
     let addon_dir: &'static Path = &Path::new(ADDONS_DIR);
     if !addon_dir.is_dir() {
@@ -96,15 +106,10 @@ fn install() -> Result<(), Box<Error>> {
 
     let temp_dir = create_temp_dir()?;
 
-    let lock_arc = Arc::new(lock);
-    let lock_for_addons = lock_arc.clone();
-    let lock_for_file = lock_arc.clone();
-    let install_future = futures::stream::iter_ok::<_, ()>(parsed.addons)
+    let install_future = futures::stream::iter_ok::<_, String>(parsed.addons)
         .map(move |addon| {
-            println!("processing {:?}", addon);
-            // TODO: fuck i feel dirty
-            let lock = &lock_for_addons;
-            let found = lock.addons.iter().find(|it| {
+            println!("processing {}", addon.name);
+            let found = LOCK.addons.iter().find(|it| {
                 // addons are unique over their name and provider
                 format!("{}/{}", addon.provider, addon.name) == it.name
             });
@@ -122,53 +127,21 @@ fn install() -> Result<(), Box<Error>> {
                 ),
                 _ => panic!("error"),
             }
-
-            // match found {
-            //     Some(lock) => {
-            //         match providers::has_update(&addon, &lock) {
-            //             (true, Some(new_lock)) => {
-            //                 println!("got update: {:?}", new_lock);
-            //                 providers::download_addon(
-            //                     &addon, &new_lock,
-            //                     &temp_dir, &addon_dir
-            //                 ).map(|_| {
-            //                     Some(new_lock)
-            //                 })
-            //             },
-            //             _ => {
-            //                 println!("{} was up to date", addon.name);
-            //                 None
-            //             },
-            //         }
-            //     },
-            //     None => {
-            //         match providers::get_lock(&addon, None) {
-            //             Some(new_lock) => {
-            //                 println!("downloading new: {:?}", new_lock);
-            //                 providers::download_addon(
-            //                     &addon, &new_lock,
-            //                     &temp_dir, &addon_dir
-            //                 );
-            //                 Some(new_lock)
-            //             },
-            //             None => {
-            //                 println!("no lock found for {}", addon.name);
-            //                 None
-            //             },
-            //         }
-            //     }
-            // }
         })
-        .buffer_unordered(10)
+        .buffer_unordered(2)
         .map(move |(downloaded, lock)| {
+            println!("extracting");
             extract::extract_zip(downloaded, addon_dir.to_path_buf());
             lock
         })
         .collect()
         .map_err(|err| println!("error: {:?}", err))
         .then(move |new_locks| {
-            let lock = &lock_for_file;
-            let _ = save_lock_file(&lock_path, &lock, &new_locks.unwrap());
+            println!("got new locks: {:?}", new_locks);
+            let lock_path = Path::new(&LOCK_FILE_PATH);
+            let _ = save_lock_file(&lock_path, &LOCK, &new_locks.unwrap());
+            println!("all done");
+
             Ok(())
         });
 
@@ -201,6 +174,7 @@ fn save_lock_file(
     path: &Path, old_lock: &LockFile,
     new_locks: &Vec<AddonLock>
 ) -> Result<(), Box<Error>> {
+    println!("saving locks file");
     let mut locks = old_lock.clone();
     for lock in new_locks {
         let existing = old_lock.addons
@@ -217,9 +191,11 @@ fn save_lock_file(
 
     let lock_str = toml::to_string(&locks)?;
     
+    println!("writing locks file");
     // recreate the file because we want to overwrite anyways
     let mut f = File::create(path)?;
     f.write_all(lock_str.as_bytes())?;
+    println!("locks file written!");
 
     Ok(())
 }
