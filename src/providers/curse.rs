@@ -96,21 +96,19 @@ enum LockInner {
     DownloadingBody(Concat2<Decoder>),
 }
 
-impl CurseLockFuture {
-    pub fn new(addon: Addon) -> CurseLockFuture {
-        let client = Client::new();
+pub fn get_lock(addon: Addon) -> CurseLockFuture {
+    let client = Client::new();
 
-        let url = if addon.provider == "curse" {
-            CURSE_FILES_URL_TEMPLATE.replace("{}", &addon.name)
-        } else {
-            ACE_FILES_URL_TEMPLATE.replace("{}", &addon.name)
-        };
+    let url = if addon.provider == "curse" {
+        CURSE_FILES_URL_TEMPLATE.replace("{}", &addon.name)
+    } else {
+        ACE_FILES_URL_TEMPLATE.replace("{}", &addon.name)
+    };
 
-        let pending = client.get(&url).send();
-        let inner = LockInner::Downloading(Box::new(pending));
+    let pending = client.get(&url).send();
+    let inner = LockInner::Downloading(Box::new(pending));
 
-        CurseLockFuture { inner, addon }
-    }
+    CurseLockFuture { inner, addon }
 }
 
 impl Future for CurseLockFuture {

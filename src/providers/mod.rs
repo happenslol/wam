@@ -41,17 +41,11 @@ pub fn get_lock(
 ) -> Option<AddonLockFuture> {
     match addon.provider.as_str() {
         "curse" | "ace" => {
-            let inner = LockInner::CurseLockFuture(
-                curse::CurseLockFuture::new(addon.clone())
-            );
-
+            let inner = LockInner::CurseLockFuture(curse::get_lock(addon.clone()));
             Some(AddonLockFuture { inner })
         },
         "tukui" => {
-            let inner = LockInner::TukLockFuture(
-                tuk::get_lock(addon.clone(), old_lock)
-            );
-
+            let inner = LockInner::TukLockFuture(tuk::get_lock(addon.clone(), old_lock));
             Some(AddonLockFuture { inner })
         },
         _ => None,
