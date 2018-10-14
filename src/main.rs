@@ -70,7 +70,6 @@ lazy_static! {
             let mut contents = String::new();
             let mut f = File::open(lock_path).unwrap();
             f.read_to_string(&mut contents).unwrap();
-            drop(f);
             toml::from_str::<LockFile>(&contents)
                 .expect("failed to parse lock file")
         }
@@ -104,7 +103,7 @@ fn install() -> Result<(), Box<Error>> {
         fs::create_dir_all(addon_dir).unwrap()
     }
 
-    let temp_dir = create_temp_dir()?;
+    let _temp_dir = create_temp_dir()?;
 
     let install_future = futures::stream::iter_ok::<_, String>(parsed.addons)
         .map(move |addon| {
@@ -122,15 +121,13 @@ fn install() -> Result<(), Box<Error>> {
             match addon_lock {
                 Some(addon_lock) => providers::download_addon(
                     &addon,
-                    &addon_lock,
-                    temp_dir.to_path_buf(),
+                    &addon_lock
                 ),
                 _ => panic!("error"),
             }
         })
-        .buffer_unordered(2)
+        .buffer_unordered(4)
         .map(move |(downloaded, lock)| {
-            println!("extracting");
             extract::extract_zip(downloaded, addon_dir.to_path_buf());
             lock
         })
@@ -140,7 +137,6 @@ fn install() -> Result<(), Box<Error>> {
             println!("got new locks: {:?}", new_locks);
             let lock_path = Path::new(&LOCK_FILE_PATH);
             let _ = save_lock_file(&lock_path, &LOCK, &new_locks.unwrap());
-            println!("all done");
 
             Ok(())
         });
@@ -174,7 +170,6 @@ fn save_lock_file(
     path: &Path, old_lock: &LockFile,
     new_locks: &Vec<AddonLock>
 ) -> Result<(), Box<Error>> {
-    println!("saving locks file");
     let mut locks = old_lock.clone();
     for lock in new_locks {
         let existing = old_lock.addons
@@ -191,11 +186,9 @@ fn save_lock_file(
 
     let lock_str = toml::to_string(&locks)?;
     
-    println!("writing locks file");
     // recreate the file because we want to overwrite anyways
     let mut f = File::create(path)?;
     f.write_all(lock_str.as_bytes())?;
-    println!("locks file written!");
 
     Ok(())
 }

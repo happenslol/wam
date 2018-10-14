@@ -6,10 +6,8 @@ mod curse;
 
 use super::{Addon, AddonLock};
 use ::std::path::PathBuf;
-use ::std::fs::File;
 
-use ::std::io::Write;
-use ::futures::{Future, Stream, Async};
+use ::futures::{Future, Async};
 
 use self::tuk::TukDownloadFuture;
 
@@ -51,8 +49,7 @@ impl Future for DownloadAddonFuture {
 }
 
 pub fn download_addon(
-    addon: &Addon, lock: &AddonLock,
-    temp_dir: PathBuf
+    addon: &Addon, lock: &AddonLock
 ) -> DownloadAddonFuture {
     let tuk_future = TukDownloadFuture::new(lock.clone(), addon.clone());
     DownloadAddonFuture {
