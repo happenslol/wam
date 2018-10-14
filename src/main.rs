@@ -10,9 +10,7 @@ extern crate toml;
 
 #[macro_use]
 extern crate futures;
-
 extern crate tokio;
-extern crate tokio_tls;
 
 #[macro_use]
 extern crate clap;

@@ -28,7 +28,7 @@ const HOME_URL: &'static str = "https://www.tukui.org/welcome.php";
 const BASE_URL_TEMPLATE: &'static str = "https://www.tukui.org{}";
 
 pub struct TukDownloadFuture {
-    inner: Inner,
+    inner: DownloadInner,
 }
 
 impl TukDownloadFuture {
@@ -41,7 +41,7 @@ impl TukDownloadFuture {
                 let pending = client.get(HOME_URL).send();
                 let inner = HomeDownloadInner::GettingDownloadLink(Box::new(pending));
 
-                Inner::HomeDownloadFuture(HomeDownloadFuture {
+                DownloadInner::HomeDownloadFuture(HomeDownloadFuture {
                     inner, lock, addon, client,
                     filename: None,
                 })
@@ -51,7 +51,7 @@ impl TukDownloadFuture {
                 let pending = client.get(&url).send();
                 let inner = AddonDownloadInner::Downloading(Box::new(pending));
 
-                Inner::AddonDownloadFuture(AddonDownloadFuture {
+                DownloadInner::AddonDownloadFuture(AddonDownloadFuture {
                     inner, lock,
                     filename: None,
                 })
@@ -67,7 +67,7 @@ impl Future for TukDownloadFuture {
     type Error = String;
 
     fn poll(&mut self) -> Result<Async<(PathBuf, AddonLock)>, String> {
-        use self::Inner::*;
+        use self::DownloadInner::*;
 
         match self.inner {
             HomeDownloadFuture(ref mut f) => f.poll(),
@@ -76,7 +76,7 @@ impl Future for TukDownloadFuture {
     }
 }
 
-enum Inner {
+enum DownloadInner {
     HomeDownloadFuture(HomeDownloadFuture),
     AddonDownloadFuture(AddonDownloadFuture),
 }

@@ -24,7 +24,7 @@ const ACE_FILES_URL_TEMPLATE: &'static str =
     "https://wowace.com/projects/{}/files?sort=releasetype";
 
 pub struct CurseDownloadFuture {
-    inner: Inner,
+    inner: DownloadInner,
     lock: AddonLock,
     filename: Option<String>,
 }
@@ -39,7 +39,7 @@ impl CurseDownloadFuture {
 
         let client = Client::new();
         let pending = client.get(&url).send();
-        let inner = Inner::Downloading(Box::new(pending));
+        let inner = DownloadInner::Downloading(Box::new(pending));
 
         CurseDownloadFuture {
             inner, lock,
@@ -48,7 +48,7 @@ impl CurseDownloadFuture {
     }
 }
 
-enum Inner {
+enum DownloadInner {
     Downloading(Box<Future<Item = Response, Error = ReqwestError> + Send>),
     DownloadingBody(Concat2<Decoder>),
 }
@@ -58,7 +58,7 @@ impl Future for CurseDownloadFuture {
     type Error = String;
 
     fn poll(&mut self) -> Result<Async<(PathBuf, AddonLock)>, String> {
-        use self::Inner::*;
+        use self::DownloadInner::*;
 
         loop {
             let next = match self.inner {
