@@ -3,7 +3,7 @@
 
 test/
 Interface/
-.updater-temp
+.wam-temp
 
 wam.toml
 wam-lock.toml
