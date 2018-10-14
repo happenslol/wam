@@ -12,3 +12,6 @@ zip = "0.4"
 select = "0.4"
 chrono = "0.4"
 clap = {version = "2.32", features = ["yaml"]}
+futures = "0.1"
+tokio = "0.1"
+lazy_static = "1.1.0"

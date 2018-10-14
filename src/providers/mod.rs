@@ -5,99 +5,96 @@ mod tuk;
 mod curse;
 
 use super::{Addon, AddonLock};
-use ::std::path::{Path, PathBuf};
-use ::std::fs::File;
+use ::std::path::PathBuf;
 
-pub fn get_lock(addon: &Addon, old_lock: Option<AddonLock>) -> Option<AddonLock> {
-    match addon.provider.as_str() {
-        "curse" | "ace" => curse::get_lock(addon),
-        "tukui" => tuk::get_lock(addon, old_lock),
-        _ => {
-            println!("unknown provider for lock get: {}", addon.provider);
-            None
+use ::futures::{Future, Async};
+
+use self::tuk::{TukDownloadFuture, TukLockFuture};
+use self::curse::{CurseDownloadFuture, CurseLockFuture};
+
+pub struct AddonLockFuture {
+    inner: LockInner,
+}
+
+enum LockInner {
+    CurseLockFuture(CurseLockFuture),
+    TukLockFuture(TukLockFuture),
+}
+
+impl Future for AddonLockFuture {
+    type Item = (Addon, AddonLock);
+    type Error = String;
+
+    fn poll(&mut self) -> Result<Async<(Addon, AddonLock)>, String> {
+        use self::LockInner::*;
+
+        match self.inner {
+            CurseLockFuture(ref mut f) => f.poll(),
+            TukLockFuture(ref mut f) => f.poll(),
         }
     }
 }
 
-pub fn has_update(addon: &Addon, lock: &AddonLock) -> (bool, Option<AddonLock>) {
-    let new_lock = get_lock(addon, Some(lock.clone())).unwrap();
-    if new_lock.timestamp > lock.timestamp {
-        return (true, Some(new_lock));
-    }
-
-    (false, None)
-}
-
-pub fn download_addon(addon: &Addon, lock: &AddonLock, temp_dir: &Path, addon_dir: &Path) {
-    let file = match addon.provider.as_str() {
-        "curse" => download_direct(
-            &curse::CURSE_DL_URL_TEMPLATE.replace("{}", &addon.name),
-            temp_dir
-        ),
-        "ace" => download_direct(
-            &curse::ACE_DL_URL_TEMPLATE.replace("{}", &addon.name),
-            temp_dir
-        ),
+pub fn get_lock(
+    addon: &Addon,
+    old_lock: Option<AddonLock>
+) -> Option<AddonLockFuture> {
+    match addon.provider.as_str() {
+        "curse" | "ace" => {
+            let inner = LockInner::CurseLockFuture(curse::get_lock(addon.clone()));
+            Some(AddonLockFuture { inner })
+        },
         "tukui" => {
-            // check we're getting tukui or elvui, those are "special"
-            if addon.name.as_str() == "elvui" || addon.name.as_str() == "tukui" {
-                download_direct(
-                    &tuk::get_quick_download_link(addon.name.as_str()),
-                    temp_dir
-                )
-            } else {
-                download_attachment(
-                    &tuk::ADDON_DL_URL_TEMPLATE.replace("{}", &lock.resolved),
-                    temp_dir
-                )
-            }
+            let inner = LockInner::TukLockFuture(tuk::get_lock(addon.clone(), old_lock));
+            Some(AddonLockFuture { inner })
         },
         _ => {
-            println!(
-                "unknown provider for addon {}: {}",
-                addon.name, addon.provider
-            );
-
+            println!("skipping unkown provider: {}/{}", addon.name, addon.provider);
             None
+        },
+    }
+}
+
+pub struct DownloadAddonFuture {
+    inner: DownloadInner,
+}
+
+enum DownloadInner {
+    CurseDownloadFuture(CurseDownloadFuture),
+    TukDownloadFuture(TukDownloadFuture),
+}
+
+impl Future for DownloadAddonFuture {
+    type Item = (PathBuf, AddonLock);
+    type Error = String;
+
+    fn poll(&mut self) -> Result<Async<(PathBuf, AddonLock)>, String> {
+        use self::DownloadInner::*;
+
+        match self.inner {
+            CurseDownloadFuture(ref mut f) => f.poll(),
+            TukDownloadFuture(ref mut f) => f.poll(),
         }
+    }
+}
+
+pub fn download_addon(
+    addon: &Addon, lock: &AddonLock
+) -> Option<DownloadAddonFuture> {
+    let provider = addon.provider.clone();
+    let inner = match provider.as_str() {
+        "curse" | "ace" => {
+            DownloadInner::CurseDownloadFuture(
+                curse::download_addon(addon.clone(), lock.clone())
+            )
+        },
+        "tukui" => {
+            DownloadInner::TukDownloadFuture(
+                tuk::download_addon(addon.clone(), lock.clone())
+            )
+        }
+        _ => return None,
     };
 
-    match file {
-        Some(file) => super::extract::extract_zip(&file, &addon_dir),
-        _ => {},
-    }
-}
-
-fn download_direct(url: &str, dir: &Path) -> Option<PathBuf> {
-    let mut res = ::reqwest::get(url).unwrap();
-    let final_url = String::from(res.url().as_str());
-    let filename = final_url.split("/").last().unwrap();
-
-    if !filename.ends_with(".zip") {
-        println!("{} not a zip file, skipping", filename);
-        return None;
-    }
-
-    let path = dir.join(filename);
-    let mut addon_file = File::create(&path).expect("could not write file");
-    let _ = res.copy_to(&mut addon_file).expect("couldnt not write to file");
-
-    Some(path)
-}
-
-fn download_attachment(url: &str, dir: &Path) -> Option<PathBuf> {
-    let mut res = ::reqwest::get(url).unwrap();
-    let disp_header = String::from(res.headers()["content-disposition"].to_str().unwrap());
-    let filename = disp_header.split("filename=").last().unwrap();
-
-    if !filename.ends_with(".zip") {
-        println!("{} not a zip file, skipping", filename);
-        return None;
-    }
-
-    let path = dir.join(filename);
-    let mut addon_file = File::create(&path).expect("could not write file");
-    let _ = res.copy_to(&mut addon_file).expect("couldnt not write to file");
-
-    Some(path)
+    Some(DownloadAddonFuture { inner })
 }
