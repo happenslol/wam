@@ -48,7 +48,10 @@ pub fn get_lock(
             let inner = LockInner::TukLockFuture(tuk::get_lock(addon.clone(), old_lock));
             Some(AddonLockFuture { inner })
         },
-        _ => None,
+        _ => {
+            println!("skipping unkown provider: {}/{}", addon.name, addon.provider);
+            None
+        },
     }
 }
 

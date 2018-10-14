@@ -109,6 +109,24 @@ fn install() -> Result<(), Box<Error>> {
             providers::get_lock(&addon, None)
         })
         .buffer_unordered(5)
+        .filter(move |(addon, lock)| {
+            match LOCK.addons.iter().find(|it| {
+                it.name == format!("{}/{}", addon.provider, addon.name)
+            }) {
+                Some(old_lock) => {
+                    let result = lock.timestamp > old_lock.timestamp;
+                    if !result {
+                        println!("addon was up to date: {}/{}", addon.provider, addon.name);
+                    }
+
+                    result
+                },
+                _ => {
+                    println!("found new addon: {}/{}", addon.provider, addon.name);
+                    true
+                },
+            }
+        })
         .filter_map(move |(addon, lock)| {
             println!("downloading {}", addon.name);
             providers::download_addon(&addon, &lock)
