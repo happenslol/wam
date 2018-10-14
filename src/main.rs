@@ -34,7 +34,13 @@ const LOCK_FILE_PATH: &'static str = "wam-lock.toml";
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ConfigFile {
+    pub config: Option<GlobalConfig>,
     pub addons: Vec<Addon>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GlobalConfig {
+    pub parallel: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -96,6 +102,13 @@ fn install() -> Result<(), Box<Error>> {
     f.read_to_string(&mut contents)?;
     let parsed: ConfigFile = toml::from_str(&contents)?;
 
+    let config = match parsed.config {
+        Some(config) => config,
+        _ => GlobalConfig {
+            parallel: Some(5),
+        }
+    };
+
     let addon_dir: &'static Path = &Path::new(ADDONS_DIR);
     if !addon_dir.is_dir() {
         fs::create_dir_all(addon_dir).unwrap()
@@ -108,7 +121,7 @@ fn install() -> Result<(), Box<Error>> {
             println!("getting lock for {}", addon.name);
             providers::get_lock(&addon, None)
         })
-        .buffer_unordered(5)
+        .buffer_unordered(config.parallel.unwrap_or(5))
         .filter(move |(addon, lock)| {
             match LOCK.addons.iter().find(|it| {
                 it.name == format!("{}/{}", addon.provider, addon.name)
@@ -131,7 +144,7 @@ fn install() -> Result<(), Box<Error>> {
             println!("downloading {}", addon.name);
             providers::download_addon(&addon, &lock)
         })
-        .buffer_unordered(5)
+        .buffer_unordered(config.parallel.unwrap_or(5))
         .map(move |(downloaded, lock)| {
             println!("downloaded {}, extracting...", lock.name);
             extract::extract_zip(downloaded, addon_dir.to_path_buf());
