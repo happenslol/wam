@@ -5,3 +5,9 @@ about: wow addon manager
 subcommands:
     - install:
         about: installs new addons and updates existing ones
+    - add:
+        about: add and install a new addon
+        args:
+            - NAME:
+                help: addon name in format <provider>/<name>
+                required: true

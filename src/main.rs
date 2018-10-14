@@ -93,7 +93,91 @@ fn main() {
         };
     }
 
+    if let Some(matches) = matches.subcommand_matches("add") {
+        let name = String::from(matches.value_of("NAME").unwrap());
+
+        match add(name) {
+            Err(err) => println!("add error occurred: {:?}", err),
+            _ => println!("added!"),
+        };
+    }
+
     delete_temp_dir().unwrap();
+}
+
+fn add(name: String) -> Result<(), Box<Error>> {
+    let mut f = File::open(CONFIG_FILE_PATH)?;
+    let mut contents = String::new();
+    f.read_to_string(&mut contents)?;
+    let mut parsed: ConfigFile = toml::from_str(&contents)?;
+
+    let name = name.to_lowercase();
+    let name_parts = name.split("/").collect::<Vec<&str>>();
+    if name_parts.len() != 2 {
+        println!("please use the format <provider>/<addon>");
+        // TODO: use actual errors
+        return Ok(());
+    }
+
+    let provider = String::from(name_parts[0]);
+    let name = String::from(name_parts[1]);
+
+    if let Some(_) = LOCK.addons.iter().find(|ref it| it.name == name.as_ref()) {
+        println!("already installed!");
+        return Ok(());
+    }
+
+    let addon = Addon { name, provider };
+
+    let addon_dir: &'static Path = &Path::new(ADDONS_DIR);
+    if !addon_dir.is_dir() {
+        fs::create_dir_all(addon_dir).unwrap()
+    }
+
+    let _temp_dir = create_temp_dir()?;
+
+    let lock_future = match providers::get_lock(&addon, None) {
+        Some(f) => f,
+        _ => {
+            println!("addon could not be found");
+            return Ok(());
+        },
+    };
+
+    let add_future = lock_future
+        .and_then(move |(addon, lock)| {
+            println!("downloading {}", addon.name);
+            providers::download_addon(&addon, &lock)
+        })
+        .map_err(|err| println!("error downloading: {}", err))
+        .map(move |result| {
+            match result {
+                Some((downloaded, lock)) => {
+                    println!("downloaded {}, extracting...", lock.name);
+                    extract::extract_zip(downloaded, addon_dir.to_path_buf());
+                    println!("done with {}", lock.name);
+                    Ok(lock)
+                },
+                _ => Err(String::from("download failed")),
+            }
+        })
+        .then(move |lock| {
+            let lock_path = Path::new(&LOCK_FILE_PATH);
+            // TODO: what the f happened here
+            let lock = lock.unwrap();
+            let _ = save_lock_file(&lock_path, &LOCK, &vec![lock.unwrap()]);
+
+            parsed.addons.push(addon);
+            let config_str = toml::to_string(&parsed).unwrap();
+            let mut f = File::create(CONFIG_FILE_PATH).unwrap();
+            f.write_all(config_str.as_bytes()).unwrap();
+
+            Ok(())
+        });
+
+    tokio::run(add_future);
+
+    Ok(())
 }
 
 fn install() -> Result<(), Box<Error>> {
