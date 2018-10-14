@@ -2,6 +2,14 @@ use super::select::predicate::*;
 use super::select::document::Document;
 
 use ::{Addon, AddonLock};
+use ::futures::{Future, Async, Stream};
+use ::futures::stream::Concat2;
+use ::std::path::{Path, PathBuf};
+use ::std::fs::File;
+use ::std::io::Write;
+
+use ::reqwest::Error as ReqwestError;
+use ::reqwest::async::{Response, Decoder, Client};
 
 pub const CURSE_DL_URL_TEMPLATE: &'static str =
     "https://wow.curseforge.com/projects/{}/files/latest";
@@ -14,6 +22,69 @@ const CURSE_FILES_URL_TEMPLATE: &'static str =
 
 const ACE_FILES_URL_TEMPLATE: &'static str =
     "https://wowace.com/projects/{}/files?sort=releasetype";
+
+pub struct CurseDownloadFuture {
+    inner: Inner,
+    lock: AddonLock,
+    filename: Option<String>,
+}
+
+impl CurseDownloadFuture {
+    pub fn new(lock: AddonLock, addon: Addon) -> CurseDownloadFuture {
+        let url = if addon.provider == "curse" {
+            CURSE_DL_URL_TEMPLATE.replace("{}", &addon.name)
+        } else {
+            ACE_DL_URL_TEMPLATE.replace("{}", &addon.name)
+        };
+
+        let client = Client::new();
+        let pending = client.get(&url).send();
+        let inner = Inner::Downloading(Box::new(pending));
+
+        CurseDownloadFuture {
+            inner, lock,
+            filename: None,
+        }
+    }
+}
+
+enum Inner {
+    Downloading(Box<Future<Item = Response, Error = ReqwestError> + Send>),
+    DownloadingBody(Concat2<Decoder>),
+}
+
+impl Future for CurseDownloadFuture {
+    type Item = (PathBuf, AddonLock);
+    type Error = String;
+
+    fn poll(&mut self) -> Result<Async<(PathBuf, AddonLock)>, String> {
+        use self::Inner::*;
+
+        loop {
+            let next = match self.inner {
+                Downloading(ref mut f) => {
+                    let res = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                    let final_url = String::from(res.url().as_str());
+                    let filename = String::from(final_url.split("/").last().unwrap());
+                    self.filename = Some(filename);
+
+                    DownloadingBody(res.into_body().concat2())
+                },
+                DownloadingBody(ref mut f) => {
+                    let body = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                    let filename = self.filename.take().unwrap();
+                    let filepath = Path::new(".wam-temp").join(&filename);
+                    let mut file = File::create(&filepath).expect("could not create file");
+                    file.write_all(&body).expect("could not write to file");
+
+                    return Ok(Async::Ready((filepath, self.lock.clone())));
+                },
+            };
+
+            self.inner = next;
+        }
+    }
+}
 
 pub fn get_lock(addon: &Addon) -> Option<AddonLock> {
     // by sorting by release type, we get releases before alphas and avoid a problem

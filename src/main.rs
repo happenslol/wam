@@ -106,7 +106,7 @@ fn install() -> Result<(), Box<Error>> {
     let _temp_dir = create_temp_dir()?;
 
     let install_future = futures::stream::iter_ok::<_, String>(parsed.addons)
-        .map(move |addon| {
+        .filter_map(move |addon| {
             println!("processing {}", addon.name);
             let found = LOCK.addons.iter().find(|it| {
                 // addons are unique over their name and provider
@@ -126,9 +126,11 @@ fn install() -> Result<(), Box<Error>> {
                 _ => panic!("error"),
             }
         })
-        .buffer_unordered(4)
+        .buffer_unordered(8)
         .map(move |(downloaded, lock)| {
+            println!("downloaded {}, extracting...", lock.name);
             extract::extract_zip(downloaded, addon_dir.to_path_buf());
+            println!("done with {}", lock.name);
             lock
         })
         .collect()
