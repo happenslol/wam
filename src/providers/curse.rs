@@ -31,22 +31,20 @@ pub struct CurseDownloadFuture {
     filename: Option<String>,
 }
 
-impl CurseDownloadFuture {
-    pub fn new(lock: AddonLock, addon: Addon) -> CurseDownloadFuture {
-        let url = if addon.provider == "curse" {
-            CURSE_DL_URL_TEMPLATE.replace("{}", &addon.name)
-        } else {
-            ACE_DL_URL_TEMPLATE.replace("{}", &addon.name)
-        };
+pub fn download_addon(addon: Addon, lock: AddonLock) -> CurseDownloadFuture {
+    let url = if addon.provider == "curse" {
+        CURSE_DL_URL_TEMPLATE.replace("{}", &addon.name)
+    } else {
+        ACE_DL_URL_TEMPLATE.replace("{}", &addon.name)
+    };
 
-        let client = Client::new();
-        let pending = client.get(&url).send();
-        let inner = DownloadInner::Downloading(Box::new(pending));
+    let client = Client::new();
+    let pending = client.get(&url).send();
+    let inner = DownloadInner::Downloading(Box::new(pending));
 
-        CurseDownloadFuture {
-            inner, lock,
-            filename: None,
-        }
+    CurseDownloadFuture {
+        inner, lock,
+        filename: None,
     }
 }
 

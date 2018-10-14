@@ -31,35 +31,33 @@ pub struct TukDownloadFuture {
     inner: DownloadInner,
 }
 
-impl TukDownloadFuture {
-    pub fn new(lock: AddonLock, addon: Addon) -> TukDownloadFuture {
-        let name = addon.name.clone();
-        let client = Client::new();
+pub fn download_addon(addon: Addon, lock: AddonLock) -> TukDownloadFuture {
+    let name = addon.name.clone();
+    let client = Client::new();
 
-        let inner = match name.as_str() {
-            "tukui" | "elvui" => {
-                let pending = client.get(HOME_URL).send();
-                let inner = HomeDownloadInner::GettingDownloadLink(Box::new(pending));
+    let inner = match name.as_str() {
+        "tukui" | "elvui" => {
+            let pending = client.get(HOME_URL).send();
+            let inner = HomeDownloadInner::GettingDownloadLink(Box::new(pending));
 
-                DownloadInner::HomeDownloadFuture(HomeDownloadFuture {
-                    inner, lock, addon, client,
-                    filename: None,
-                })
-            },
-            _ => {
-                let url = ADDON_DL_URL_TEMPLATE.replace("{}", &lock.resolved);
-                let pending = client.get(&url).send();
-                let inner = AddonDownloadInner::Downloading(Box::new(pending));
+            DownloadInner::HomeDownloadFuture(HomeDownloadFuture {
+                inner, lock, addon, client,
+                filename: None,
+            })
+        },
+        _ => {
+            let url = ADDON_DL_URL_TEMPLATE.replace("{}", &lock.resolved);
+            let pending = client.get(&url).send();
+            let inner = AddonDownloadInner::Downloading(Box::new(pending));
 
-                DownloadInner::AddonDownloadFuture(AddonDownloadFuture {
-                    inner, lock,
-                    filename: None,
-                })
-            },
-        };
+            DownloadInner::AddonDownloadFuture(AddonDownloadFuture {
+                inner, lock,
+                filename: None,
+            })
+        },
+    };
 
-        TukDownloadFuture { inner }
-    }
+    TukDownloadFuture { inner }
 }
 
 impl Future for TukDownloadFuture {

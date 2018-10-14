@@ -81,14 +81,14 @@ pub fn download_addon(
     let provider = addon.provider.clone();
     let inner = match provider.as_str() {
         "curse" | "ace" => {
-            DownloadInner::CurseDownloadFuture(CurseDownloadFuture::new(
-                lock.clone(), addon.clone()
-            ))
+            DownloadInner::CurseDownloadFuture(
+                curse::download_addon(addon.clone(), lock.clone())
+            )
         },
         "tukui" => {
-            DownloadInner::TukDownloadFuture(TukDownloadFuture::new(
-                lock.clone(), addon.clone()
-            ))
+            DownloadInner::TukDownloadFuture(
+                tuk::download_addon(addon.clone(), lock.clone())
+            )
         }
         _ => return None,
     };
