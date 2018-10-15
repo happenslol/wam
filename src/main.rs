@@ -12,9 +12,8 @@ extern crate toml;
 extern crate futures;
 extern crate tokio;
 
-#[macro_use]
 extern crate clap;
-use clap::{App, AppSettings};
+use clap::{App, AppSettings, SubCommand};
 
 mod extract;
 mod providers;
@@ -81,10 +80,27 @@ lazy_static! {
 }
 
 fn main() {
-    let cli_yaml = load_yaml!("cli.yml");
-    let matches = App::from_yaml(cli_yaml)
+    let app = App::new("wam")
+        .version("0.1")
+        .author("Hilmar Wiegand <me@hwgnd.de>")
+        .about("WoW Addon Manager")
         .setting(AppSettings::ArgRequiredElseHelp)
-        .get_matches();
+        .subcommands(vec![
+            SubCommand::with_name("install")
+                .about("install new addons and update existing ones"),
+
+            SubCommand::with_name("add")
+                .about("add and install a new addon")
+                .args_from_usage("[NAME] 'addon name in format <provider>/<name>'"),
+
+            SubCommand::with_name("remove")
+                .about("not implemented"),
+
+            SubCommand::with_name("search")
+                .about("not implemented"),
+        ]);
+
+    let matches = app.get_matches();
 
     if let Some(_) = matches.subcommand_matches("install") {
         match install() {
