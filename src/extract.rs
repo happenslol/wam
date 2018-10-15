@@ -4,7 +4,7 @@ use ::std::path::PathBuf;
 use ::std::fs;
 use ::std::io;
 
-pub fn extract_zip(path: PathBuf, dest: PathBuf) {
+pub fn extract_zip(path: PathBuf, dest: &PathBuf) {
     let file = fs::File::open(&path).unwrap();
     let mut archive = zip::ZipArchive::new(file).unwrap();
 

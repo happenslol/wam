@@ -36,16 +36,17 @@ impl Future for AddonLockFuture {
 }
 
 pub fn get_lock(
-    addon: &Addon,
-    old_lock: Option<AddonLock>
+    addon: (Addon, Option<AddonLock>)
 ) -> Option<AddonLockFuture> {
+    let (addon, old_lock) = addon;
+
     match addon.provider.as_str() {
         "curse" | "ace" => {
-            let inner = LockInner::CurseLockFuture(curse::get_lock(addon.clone()));
+            let inner = LockInner::CurseLockFuture(curse::get_lock(addon));
             Some(AddonLockFuture { inner })
         },
         "tukui" => {
-            let inner = LockInner::TukLockFuture(tuk::get_lock(addon.clone(), old_lock));
+            let inner = LockInner::TukLockFuture(tuk::get_lock(addon, old_lock));
             Some(AddonLockFuture { inner })
         },
         _ => {
@@ -79,18 +80,20 @@ impl Future for DownloadAddonFuture {
 }
 
 pub fn download_addon(
-    addon: &Addon, lock: &AddonLock
+    addon: (Addon, AddonLock)
 ) -> Option<DownloadAddonFuture> {
+    let (addon, lock) = addon;
+
     let provider = addon.provider.clone();
     let inner = match provider.as_str() {
         "curse" | "ace" => {
             DownloadInner::CurseDownloadFuture(
-                curse::download_addon(addon.clone(), lock.clone())
+                curse::download_addon(addon, lock)
             )
         },
         "tukui" => {
             DownloadInner::TukDownloadFuture(
-                tuk::download_addon(addon.clone(), lock.clone())
+                tuk::download_addon(addon, lock)
             )
         }
         _ => return None,

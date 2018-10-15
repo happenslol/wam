@@ -26,7 +26,7 @@ use std::error::Error;
 use futures::{Future, Stream};
 
 const TEMP_DIR: &'static str = ".wam-temp";
-const ADDONS_DIR: &'static str = "Interface/Addons";
+const ADDON_DIR_PATH: &'static str = "Interface/Addons";
 
 const CONFIG_FILE_PATH: &'static str = "wam.toml";
 const LOCK_FILE_PATH: &'static str = "wam-lock.toml";
@@ -76,6 +76,17 @@ lazy_static! {
             toml::from_str::<LockFile>(&contents)
                 .expect("failed to parse lock file")
         }
+    };
+}
+
+lazy_static! {
+    static ref ADDON_DIR: PathBuf = {
+        let addon_dir = Path::new(ADDON_DIR_PATH);
+        if !addon_dir.is_dir() {
+            fs::create_dir_all(addon_dir).unwrap();
+        }
+
+        addon_dir.to_path_buf()
     };
 }
 
@@ -131,7 +142,6 @@ fn add(name: String) -> Result<(), Box<Error>> {
     let name_parts = name.split("/").collect::<Vec<&str>>();
     if name_parts.len() != 2 {
         println!("please use the format <provider>/<addon>");
-        // TODO: use actual errors
         return Ok(());
     }
 
@@ -146,24 +156,16 @@ fn add(name: String) -> Result<(), Box<Error>> {
     let addon = Addon { name, provider };
     let addon_for_lock = addon.clone();
 
-    let addon_dir: &'static Path = &Path::new(ADDONS_DIR);
-    if !addon_dir.is_dir() {
-        fs::create_dir_all(addon_dir).unwrap()
-    }
-
     let _temp_dir = create_temp_dir()?;
 
     let add_future = |f: providers::AddonLockFuture| { f
-        .and_then(move |(addon, lock)| {
-            println!("downloading {}", addon.name);
-            providers::download_addon(&addon, &lock)
-        })
+        .and_then(providers::download_addon)
         .map_err(|err| println!("error downloading: {}", err))
         .map(move |result| {
             match result {
                 Some((downloaded, lock)) => {
                     println!("downloaded {}, extracting...", lock.name);
-                    extract::extract_zip(downloaded, addon_dir.to_path_buf());
+                    extract::extract_zip(downloaded, &ADDON_DIR);
                     println!("done with {}", lock.name);
                     Ok(lock)
                 },
@@ -181,7 +183,7 @@ fn add(name: String) -> Result<(), Box<Error>> {
         })
     };
 
-    match providers::get_lock(&addon_for_lock, None).map(add_future) {
+    match providers::get_lock((addon_for_lock, None)).map(add_future) {
         Some(add_future) => tokio::run(add_future),
         _ => println!("addon not found"),
     };
@@ -202,61 +204,59 @@ fn install() -> Result<(), Box<Error>> {
         }
     };
 
-    let addon_dir: &'static Path = &Path::new(ADDONS_DIR);
-    if !addon_dir.is_dir() {
-        fs::create_dir_all(addon_dir).unwrap()
-    }
-
     let _temp_dir = create_temp_dir()?;
 
-    let install_future = futures::stream::iter_ok::<_, String>(parsed.addons)
-        .filter_map(move |addon| {
-            println!("getting lock for {}", addon.name);
-            providers::get_lock(&addon, None)
-        })
-        .buffer_unordered(config.parallel.unwrap_or(5))
-        .filter(move |(addon, lock)| {
-            match LOCK.addons.iter().find(|it| {
-                it.name == format!("{}/{}", addon.provider, addon.name)
-            }) {
-                Some(old_lock) => {
-                    let result = lock.timestamp > old_lock.timestamp;
-                    if !result {
-                        println!("addon was up to date: {}/{}", addon.provider, addon.name);
-                    }
+    let parsed_with_locks = parsed.addons.into_iter().map(|it| {
+        let maybe_lock = find_existing_lock(&it);
+        (it, maybe_lock)
+    }).collect::<Vec<(Addon, Option<AddonLock>)>>();
 
-                    result
-                },
-                _ => {
-                    println!("found new addon: {}/{}", addon.provider, addon.name);
-                    true
-                },
+    let install_future = futures::future::ok::<_, String>(parsed_with_locks)
+        .map(|it| {
+            if it.is_empty() {
+                println!("no addons");
+            } else {
+                println!("getting locks for {} addons...", it.len());
             }
+
+            futures::stream::iter_ok(it)
         })
-        .filter_map(move |(addon, lock)| {
-            println!("downloading {}", addon.name);
-            providers::download_addon(&addon, &lock)
+        .flatten_stream()
+        .filter_map(providers::get_lock)
+        .buffer_unordered(config.parallel.unwrap_or(5))
+        .filter(|(addon, lock)| find_existing_lock(&addon)
+            .map(|found| lock.timestamp > found.timestamp)
+            .unwrap_or(true)
+        )
+        .collect()
+        .map(|it| {
+            println!("downloading {} addons...", it.len());
+            it
         })
+        .map(futures::stream::iter_ok)
+        .flatten_stream()
+        .filter_map(providers::download_addon)
         .buffer_unordered(config.parallel.unwrap_or(5))
         .map(move |(downloaded, lock)| {
-            println!("downloaded {}, extracting...", lock.name);
-            extract::extract_zip(downloaded, addon_dir.to_path_buf());
-            println!("done with {}", lock.name);
+            extract::extract_zip(downloaded, &ADDON_DIR);
             lock
         })
         .collect()
-        .map_err(|err| println!("error: {:?}", err))
-        .then(move |new_locks| {
-            println!("got new locks: {:?}", new_locks);
+        .map(|new_locks| {
             let lock_path = Path::new(&LOCK_FILE_PATH);
-            let _ = save_lock_file(&lock_path, &LOCK, &new_locks.unwrap());
-
-            Ok(())
-        });
+            let _ = save_lock_file(&lock_path, &LOCK, &new_locks);
+        })
+        .map_err(|_| ());
 
     tokio::run(install_future);
 
     Ok(())
+}
+
+fn find_existing_lock(addon: &Addon) -> Option<AddonLock> {
+    LOCK.addons.iter().find(|it| {
+        it.name == format!("{}/{}", addon.provider, addon.name)
+    }).map(Clone::clone)
 }
 
 fn create_temp_dir() -> Result<PathBuf, Box<Error>> {

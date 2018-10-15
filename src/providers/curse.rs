@@ -165,7 +165,6 @@ impl Future for CurseLockFuture {
                         version, timestamp,
                     };
 
-                    println!("got curse lock: {:?}", result);
                     return Ok(Async::Ready((self.addon.clone(), result)));
                 },
             };
