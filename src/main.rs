@@ -13,7 +13,7 @@ extern crate futures;
 extern crate tokio;
 
 extern crate clap;
-use clap::{App, AppSettings, SubCommand};
+extern crate indicatif;
 
 mod extract;
 mod providers;
@@ -24,6 +24,10 @@ use std::io::prelude::*;
 use std::error::Error;
 
 use futures::{Future, Stream};
+
+use clap::{App, AppSettings, SubCommand};
+use indicatif::{HumanDuration, MultiProgress, ProgressStyle, ProgressBar};
+use std::time::{Duration, Instant};
 
 const TEMP_DIR: &'static str = ".wam-temp";
 const ADDON_DIR_PATH: &'static str = "Interface/Addons";
@@ -90,7 +94,17 @@ lazy_static! {
     };
 }
 
+lazy_static! {
+    static ref SPINNER_STYLE: ProgressStyle = {
+        ProgressStyle::default_spinner()
+            .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ ")
+            .template("{prefix:.bold.dim} {spinner} {wide_msg}")
+    };
+}
+
 fn main() {
+    let started = Instant::now();
+
     let app = App::new("wam")
         .version("0.1")
         .author("Hilmar Wiegand <me@hwgnd.de>")
@@ -130,6 +144,8 @@ fn main() {
     }
 
     delete_temp_dir().unwrap();
+
+    println!("Done in {}", HumanDuration(started.elapsed()));
 }
 
 fn add(name: String) -> Result<(), Box<Error>> {
@@ -158,8 +174,11 @@ fn add(name: String) -> Result<(), Box<Error>> {
 
     let _temp_dir = create_temp_dir()?;
 
+    let m = MultiProgress::new();
+    let m2 = MultiProgress::new();
+
     let add_future = |f: providers::AddonLockFuture| { f
-        .and_then(providers::download_addon)
+        .and_then(move |it| providers::download_addon(it, m.add(ProgressBar::new(0))))
         .map_err(|err| println!("error downloading: {}", err))
         .map(move |result| {
             match result {
@@ -183,7 +202,8 @@ fn add(name: String) -> Result<(), Box<Error>> {
         })
     };
 
-    match providers::get_lock((addon_for_lock, None)).map(add_future) {
+    let pb = m2.add(ProgressBar::new(0));
+    match providers::get_lock((addon_for_lock, None), pb).map(add_future) {
         Some(add_future) => tokio::run(add_future),
         _ => println!("addon not found"),
     };
@@ -211,31 +231,20 @@ fn install() -> Result<(), Box<Error>> {
         (it, maybe_lock)
     }).collect::<Vec<(Addon, Option<AddonLock>)>>();
 
-    let install_future = futures::future::ok::<_, String>(parsed_with_locks)
-        .map(|it| {
-            if it.is_empty() {
-                println!("no addons");
-            } else {
-                println!("getting locks for {} addons...", it.len());
-            }
+    let m = MultiProgress::new();
+    let m2 = MultiProgress::new();
 
-            futures::stream::iter_ok(it)
-        })
-        .flatten_stream()
-        .filter_map(providers::get_lock)
+    let install_future = futures::stream::iter_ok(parsed_with_locks)
+        .filter_map(move |it| providers::get_lock(it, m.add(ProgressBar::new(0))))
         .buffer_unordered(config.parallel.unwrap_or(5))
         .filter(|(addon, lock)| find_existing_lock(&addon)
             .map(|found| lock.timestamp > found.timestamp)
             .unwrap_or(true)
         )
         .collect()
-        .map(|it| {
-            println!("downloading {} addons...", it.len());
-            it
-        })
         .map(futures::stream::iter_ok)
         .flatten_stream()
-        .filter_map(providers::download_addon)
+        .filter_map(move |it| providers::download_addon(it, m2.add(ProgressBar::new(0))))
         .buffer_unordered(config.parallel.unwrap_or(5))
         .map(move |(downloaded, lock)| {
             extract::extract_zip(downloaded, &ADDON_DIR);
@@ -246,9 +255,12 @@ fn install() -> Result<(), Box<Error>> {
             let lock_path = Path::new(&LOCK_FILE_PATH);
             let _ = save_lock_file(&lock_path, &LOCK, &new_locks);
         })
+        // TODO: do error handling here
         .map_err(|_| ());
 
     tokio::run(install_future);
+    m.join();
+    m2.join_and_clear();
 
     Ok(())
 }

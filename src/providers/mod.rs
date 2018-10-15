@@ -12,6 +12,8 @@ use ::futures::{Future, Async};
 use self::tuk::{TukDownloadFuture, TukLockFuture};
 use self::curse::{CurseDownloadFuture, CurseLockFuture};
 
+use ::indicatif::ProgressBar;
+
 pub struct AddonLockFuture {
     inner: LockInner,
 }
@@ -36,7 +38,7 @@ impl Future for AddonLockFuture {
 }
 
 pub fn get_lock(
-    addon: (Addon, Option<AddonLock>)
+    addon: (Addon, Option<AddonLock>), pb: ProgressBar
 ) -> Option<AddonLockFuture> {
     let (addon, old_lock) = addon;
 
@@ -80,7 +82,7 @@ impl Future for DownloadAddonFuture {
 }
 
 pub fn download_addon(
-    addon: (Addon, AddonLock)
+    addon: (Addon, AddonLock), pb: ProgressBar
 ) -> Option<DownloadAddonFuture> {
     let (addon, lock) = addon;
 
@@ -88,7 +90,7 @@ pub fn download_addon(
     let inner = match provider.as_str() {
         "curse" | "ace" => {
             DownloadInner::CurseDownloadFuture(
-                curse::download_addon(addon, lock)
+                curse::download_addon(addon, lock, pb)
             )
         },
         "tukui" => {

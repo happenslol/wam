@@ -8,6 +8,7 @@ use ::std::fs::File;
 use ::std::io::Write;
 
 use ::reqwest::async::{Response, Client, Chunk};
+use indicatif::ProgressBar;
 
 pub const CURSE_DL_URL_TEMPLATE: &'static str =
     "https://wow.curseforge.com/projects/{}/files/latest";
@@ -29,15 +30,18 @@ pub struct CurseDownloadFuture {
     addon: Addon,
     lock: AddonLock,
     filename: Option<String>,
+    pb: ProgressBar,
 }
 
-pub fn download_addon(addon: Addon, lock: AddonLock) -> CurseDownloadFuture {
+pub fn download_addon(addon: Addon, lock: AddonLock, pb: ProgressBar) -> CurseDownloadFuture {
+    pb.set_style(::SPINNER_STYLE.clone());
     CurseDownloadFuture {
         inner: DownloadInner::Idle,
         client: Client::new(),
         addon,
         lock,
         filename: None,
+        pb,
     }
 }
 
@@ -57,6 +61,8 @@ impl Future for CurseDownloadFuture {
         loop {
             let next = match self.inner {
                 Idle => {
+                    // TODO: can we make this indefinite somehow?
+                    self.pb.set_length(1000);
                     let url = if self.addon.provider == "curse" {
                         CURSE_DL_URL_TEMPLATE.replace("{}", &self.addon.name)
                     } else {
@@ -65,6 +71,10 @@ impl Future for CurseDownloadFuture {
 
                     let pending = self.client.get(&url).send()
                         .map_err(|err| format!("{}", err));
+
+                    let message = format!("{}: resolving filename", self.addon.name);
+                    self.pb.set_message(&message);
+                    self.pb.inc(1);
 
                     ReadingFilename(Box::new(pending))
                 },
@@ -77,15 +87,20 @@ impl Future for CurseDownloadFuture {
                     let body = res.into_body().concat2()
                         .map_err(|err| format!("{}", err));
 
+                    let message = format!("{}: downloading", self.addon.name);
+                    self.pb.set_message(&message);
+                    self.pb.inc(1);
                     Downloading(Box::new(body))
                 },
                 Downloading(ref mut f) => {
+                    self.pb.inc(1);
                     let body = try_ready!(f.map_err(|err| format!("{}", err)).poll());
                     let filename = self.filename.take().unwrap();
                     let filepath = Path::new(".wam-temp").join(&filename);
                     let mut file = File::create(&filepath).expect("could not create file");
                     file.write_all(&body).expect("could not write to file");
 
+                    self.pb.finish_and_clear();
                     return Ok(Async::Ready((filepath, self.lock.clone())));
                 },
             };
