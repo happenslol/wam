@@ -135,13 +135,13 @@ fn add(name: String) -> Result<(), Box<Error>> {
         return Ok(());
     }
 
-    let provider = String::from(name_parts[0]);
-    let name = String::from(name_parts[1]);
-
-    if let Some(_) = LOCK.addons.iter().find(|ref it| it.name == name.as_ref()) {
+    if let Some(_) = LOCK.addons.iter().find(|&it| it.name == name) {
         println!("already installed!");
         return Ok(());
     }
+
+    let provider = String::from(name_parts[0]);
+    let name = String::from(name_parts[1]);
 
     let addon = Addon { name, provider };
 
