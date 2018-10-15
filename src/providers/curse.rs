@@ -3,13 +3,11 @@ use super::select::document::Document;
 
 use ::{Addon, AddonLock};
 use ::futures::{Future, Async, Stream};
-use ::futures::stream::Concat2;
 use ::std::path::{Path, PathBuf};
 use ::std::fs::File;
 use ::std::io::Write;
 
-use ::reqwest::Error as ReqwestError;
-use ::reqwest::async::{Response, Decoder, Client};
+use ::reqwest::async::{Response, Client, Chunk};
 
 pub const CURSE_DL_URL_TEMPLATE: &'static str =
     "https://wow.curseforge.com/projects/{}/files/latest";
@@ -27,30 +25,26 @@ const ACE_FILES_URL_TEMPLATE: &'static str =
 
 pub struct CurseDownloadFuture {
     inner: DownloadInner,
+    client: Client,
+    addon: Addon,
     lock: AddonLock,
     filename: Option<String>,
 }
 
 pub fn download_addon(addon: Addon, lock: AddonLock) -> CurseDownloadFuture {
-    let url = if addon.provider == "curse" {
-        CURSE_DL_URL_TEMPLATE.replace("{}", &addon.name)
-    } else {
-        ACE_DL_URL_TEMPLATE.replace("{}", &addon.name)
-    };
-
-    let client = Client::new();
-    let pending = client.get(&url).send();
-    let inner = DownloadInner::Downloading(Box::new(pending));
-
     CurseDownloadFuture {
-        inner, lock,
+        inner: DownloadInner::Idle,
+        client: Client::new(),
+        addon,
+        lock,
         filename: None,
     }
 }
 
 enum DownloadInner {
-    Downloading(Box<Future<Item = Response, Error = ReqwestError> + Send>),
-    DownloadingBody(Concat2<Decoder>),
+    Idle,
+    ReadingFilename(Box<Future<Item = Response, Error = String> + Send>),
+    Downloading(Box<Future<Item = Chunk, Error = String> + Send>),
 }
 
 impl Future for CurseDownloadFuture {
@@ -62,15 +56,30 @@ impl Future for CurseDownloadFuture {
 
         loop {
             let next = match self.inner {
-                Downloading(ref mut f) => {
-                    let res = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                Idle => {
+                    let url = if self.addon.provider == "curse" {
+                        CURSE_DL_URL_TEMPLATE.replace("{}", &self.addon.name)
+                    } else {
+                        ACE_DL_URL_TEMPLATE.replace("{}", &self.addon.name)
+                    };
+
+                    let pending = self.client.get(&url).send()
+                        .map_err(|err| format!("{}", err));
+
+                    ReadingFilename(Box::new(pending))
+                },
+                ReadingFilename(ref mut f) => {
+                    let res = try_ready!(f.poll());
                     let final_url = String::from(res.url().as_str());
                     let filename = String::from(final_url.split("/").last().unwrap());
                     self.filename = Some(filename);
 
-                    DownloadingBody(res.into_body().concat2())
+                    let body = res.into_body().concat2()
+                        .map_err(|err| format!("{}", err));
+
+                    Downloading(Box::new(body))
                 },
-                DownloadingBody(ref mut f) => {
+                Downloading(ref mut f) => {
                     let body = try_ready!(f.map_err(|err| format!("{}", err)).poll());
                     let filename = self.filename.take().unwrap();
                     let filepath = Path::new(".wam-temp").join(&filename);
@@ -88,27 +97,21 @@ impl Future for CurseDownloadFuture {
 
 pub struct CurseLockFuture {
     inner: LockInner,
+    client: Client,
     addon: Addon,
 }
 
 enum LockInner {
-    Downloading(Box<Future<Item = Response, Error = ReqwestError> + Send>),
-    DownloadingBody(Concat2<Decoder>),
+    Idle,
+    Downloading(Box<Future<Item = Chunk, Error = String> + Send>),
 }
 
 pub fn get_lock(addon: Addon) -> CurseLockFuture {
-    let client = Client::new();
-
-    let url = if addon.provider == "curse" {
-        CURSE_FILES_URL_TEMPLATE.replace("{}", &addon.name)
-    } else {
-        ACE_FILES_URL_TEMPLATE.replace("{}", &addon.name)
-    };
-
-    let pending = client.get(&url).send();
-    let inner = LockInner::Downloading(Box::new(pending));
-
-    CurseLockFuture { inner, addon }
+    CurseLockFuture {
+        inner: LockInner::Idle,
+        client: Client::new(),
+        addon,
+    }
 }
 
 impl Future for CurseLockFuture {
@@ -120,12 +123,21 @@ impl Future for CurseLockFuture {
 
         loop {
             let next = match self.inner {
-                Downloading(ref mut f) => {
-                    let res = try_ready!(f.map_err(|err| format!("{}", err)).poll());
-                    DownloadingBody(res.into_body().concat2())
+                Idle => {
+                    let url = if self.addon.provider == "curse" {
+                        CURSE_FILES_URL_TEMPLATE.replace("{}", &self.addon.name)
+                    } else {
+                        ACE_FILES_URL_TEMPLATE.replace("{}", &self.addon.name)
+                    };
+
+                    let pending = self.client.get(&url).send()
+                        .and_then(|res| res.into_body().concat2())
+                        .map_err(|err| format!("{}", err));
+
+                    Downloading(Box::new(pending))
                 },
-                DownloadingBody(ref mut f) => {
-                    let body = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                Downloading(ref mut f) => {
+                    let body = try_ready!(f.poll());
                     let files_page = String::from_utf8(body.to_vec()).unwrap();
 
                     let doc = Document::from(files_page.as_str());

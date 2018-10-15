@@ -4,13 +4,11 @@ use super::chrono::prelude::*;
 
 use ::{Addon, AddonLock};
 use ::futures::{Future, Async, Stream};
-use ::futures::stream::Concat2;
 use ::std::path::{Path, PathBuf};
 use ::std::fs::File;
 use ::std::io::Write;
 
-use ::reqwest::Error as ReqwestError;
-use ::reqwest::async::{Response, Decoder, Client};
+use ::reqwest::async::{Response, Client, Chunk};
 
 pub const ADDON_DL_URL_TEMPLATE: &'static str =
     "https://www.tukui.org/addons.php?download={}";
@@ -36,25 +34,16 @@ pub fn download_addon(addon: Addon, lock: AddonLock) -> TukDownloadFuture {
     let client = Client::new();
 
     let inner = match name.as_str() {
-        "tukui" | "elvui" => {
-            let pending = client.get(HOME_URL).send();
-            let inner = HomeDownloadInner::GettingDownloadLink(Box::new(pending));
-
-            DownloadInner::HomeDownloadFuture(HomeDownloadFuture {
-                inner, lock, addon, client,
-                filename: None,
-            })
-        },
-        _ => {
-            let url = ADDON_DL_URL_TEMPLATE.replace("{}", &lock.resolved);
-            let pending = client.get(&url).send();
-            let inner = AddonDownloadInner::Downloading(Box::new(pending));
-
-            DownloadInner::AddonDownloadFuture(AddonDownloadFuture {
-                inner, lock,
-                filename: None,
-            })
-        },
+        "tukui" | "elvui" => DownloadInner::HomeDownloadFuture(HomeDownloadFuture {
+            lock, addon, client,
+            inner: HomeDownloadInner::Idle,
+            filename: None,
+        }),
+        _ => DownloadInner::AddonDownloadFuture(AddonDownloadFuture {
+            lock, client,
+            inner: AddonDownloadInner::Idle,
+            filename: None,
+        }),
     };
 
     TukDownloadFuture { inner }
@@ -88,10 +77,9 @@ struct HomeDownloadFuture {
 }
 
 enum HomeDownloadInner {
-    GettingDownloadLink(Box<Future<Item = Response, Error = ReqwestError> + Send>),
-    GettingDownloadLinkBody(Concat2<Decoder>),
-    Downloading(Box<Future<Item = Response, Error = ReqwestError> + Send>),
-    DownloadingBody(Concat2<Decoder>),
+    Idle,
+    GettingDownloadLink(Box<Future<Item = Chunk, Error = String> + Send>),
+    Downloading(Box<Future<Item = Chunk, Error = String> + Send>),
 }
 
 impl Future for HomeDownloadFuture {
@@ -103,11 +91,14 @@ impl Future for HomeDownloadFuture {
 
         loop {
             let next = match self.inner {
-                GettingDownloadLink(ref mut f) => {
-                    let res = try_ready!(f.map_err(|err| format!("{}", err)).poll());
-                    GettingDownloadLinkBody(res.into_body().concat2())
+                Idle => {
+                    let pending = self.client.get(HOME_URL).send()
+                        .and_then(|res| res.into_body().concat2())
+                        .map_err(|err| format!("{}", err));
+
+                    GettingDownloadLink(Box::new(pending))
                 },
-                GettingDownloadLinkBody(ref mut f) => {
+                GettingDownloadLink(ref mut f) => {
                     let homepage = try_ready!(f.map_err(|err| format!("{}", err)).poll());
                     let homepage = String::from_utf8(homepage.to_vec()).unwrap();
 
@@ -128,14 +119,13 @@ impl Future for HomeDownloadFuture {
                         };
                     }
 
-                    let pending = self.client.get(&url.unwrap()).send();
+                    let pending = self.client.get(&url.unwrap()).send()
+                        .and_then(|res| res.into_body().concat2())
+                        .map_err(|err| format!("{}", err));
+
                     Downloading(Box::new(pending))
                 },
                 Downloading(ref mut f) => {
-                    let res = try_ready!(f.map_err(|err| format!("{}", err)).poll());
-                    DownloadingBody(res.into_body().concat2())
-                },
-                DownloadingBody(ref mut f) => {
                     let body = try_ready!(f.map_err(|err| format!("{}", err)).poll());
                     let filename = self.filename.take().unwrap();
                     let filepath = Path::new(&".wam-temp").join(&filename);
@@ -153,13 +143,15 @@ impl Future for HomeDownloadFuture {
 
 struct AddonDownloadFuture {
     inner: AddonDownloadInner,
+    client: Client,
     lock: AddonLock,
     filename: Option<String>,
 }
 
 enum AddonDownloadInner {
-    Downloading(Box<Future<Item = Response, Error = ReqwestError> + Send>),
-    DownloadingBody(Concat2<Decoder>),
+    Idle,
+    ReadingFilename(Box<Future<Item = Response, Error = String> + Send>),
+    Downloading(Box<Future<Item = Chunk, Error = String> + Send>),
 }
 
 impl Future for AddonDownloadFuture {
@@ -171,8 +163,15 @@ impl Future for AddonDownloadFuture {
 
         loop {
             let next = match self.inner {
-                Downloading(ref mut f) => {
-                    let res = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                Idle => {
+                    let url = ADDON_DL_URL_TEMPLATE.replace("{}", &self.lock.resolved);
+                    let pending = self.client.get(&url).send()
+                        .map_err(|err| format!("{}", err));
+
+                    ReadingFilename(Box::new(pending))
+                },
+                ReadingFilename(ref mut f) => {
+                    let res = try_ready!(f.poll());
                     let filename = {
                         let header = res.headers()["content-disposition"].to_str().unwrap();
                         let filename = header.split("filename=").last().unwrap();
@@ -180,11 +179,13 @@ impl Future for AddonDownloadFuture {
                     };
 
                     self.filename = Some(filename);
+                    let body = res.into_body().concat2()
+                        .map_err(|err| format!("{}", err));
 
-                    DownloadingBody(res.into_body().concat2())
+                    Downloading(Box::new(body))
                 },
-                DownloadingBody(ref mut f) => {
-                    let body = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+                Downloading(ref mut f) => {
+                    let body = try_ready!(f.poll());
                     let filename = self.filename.take().unwrap();
                     let filepath = Path::new(".wam-temp").join(&filename);
                     let mut file = File::create(&filepath).expect("could not create file");
@@ -208,37 +209,15 @@ pub fn get_lock(addon: Addon, old_lock: Option<AddonLock>) -> TukLockFuture {
     let client = Client::new();
 
     let inner = match name.as_str() {
-        "tukui" | "elvui" => {
-            let url = UI_DL_URL_TEMPLATE.replace("{}", &addon.name);
-            let pending = client.get(&url).send();
-            let inner = HomeLockInner::Downloading(Box::new(pending));
-
-            LockInner::HomeLockFuture(HomeLockFuture {
-                inner, addon,
-            })
-        },
-        _ => {
-            if let Some(old_lock) = old_lock {
-                let resolved = old_lock.resolved.clone();
-                let url = ADDON_DL_URL_TEMPLATE.replace("{}", &addon.name);
-                let pending = client.get(&url).send();
-                let inner = AddonLockInner::Downloading(Box::new(pending));
-
-                LockInner::AddonLockFuture(AddonLockFuture {
-                    inner, client, addon,
-                    resolved: Some(resolved),
-                })
-            } else {
-                let url = SEARCH_URL_TEMPLATE.replace("{}", &addon.name);
-                let pending = client.get(&url).send();
-                let inner = AddonLockInner::Resolving(Box::new(pending));
-
-                LockInner::AddonLockFuture(AddonLockFuture {
-                    inner, client, addon,
-                    resolved: None,
-                })
-            }
-        },
+        "tukui" | "elvui" => LockInner::HomeLockFuture(HomeLockFuture {
+            inner: HomeLockInner::Idle,
+            client, addon,
+        }),
+        _ => LockInner::AddonLockFuture(AddonLockFuture {
+            inner: AddonLockInner::Idle,
+            resolved: old_lock.and_then(|it| Some(it.resolved)),
+            client, addon,
+        }),
     };
 
     TukLockFuture { inner }
@@ -265,12 +244,13 @@ enum LockInner {
 
 struct HomeLockFuture {
     inner: HomeLockInner,
+    client: Client,
     addon: Addon,
 }
 
 enum HomeLockInner {
-    Downloading(Box<Future<Item = Response, Error = ReqwestError> + Send>),
-    DownloadingBody(Concat2<Decoder>),
+    Idle,
+    Downloading(Box<Future<Item = Chunk, Error = String> + Send>),
 }
 
 impl Future for HomeLockFuture {
@@ -282,11 +262,15 @@ impl Future for HomeLockFuture {
 
         loop {
             let next = match self.inner {
-                Downloading(ref mut f) => {
-                    let res = try_ready!(f.map_err(|err| format!("{}", err)).poll());
-                    DownloadingBody(res.into_body().concat2())
+                Idle => {
+                    let url = UI_DL_URL_TEMPLATE.replace("{}", &self.addon.name);
+                    let pending = self.client.get(&url).send()
+                        .and_then(|res| res.into_body().concat2())
+                        .map_err(|err| format!("{}", err));
+
+                    Downloading(Box::new(pending))
                 },
-                DownloadingBody(ref mut f) => {
+                Downloading(ref mut f) => {
                     let body = try_ready!(f.map_err(|err| format!("{}", err)).poll());
                     let page = String::from_utf8(body.to_vec()).unwrap();
                     let doc = Document::from(page.as_str());
@@ -327,10 +311,9 @@ struct AddonLockFuture {
 }
 
 enum AddonLockInner {
-    Resolving(Box<Future<Item = Response, Error = ReqwestError> + Send>),
-    ResolvingBody(Concat2<Decoder>),
-    Downloading(Box<Future<Item = Response, Error = ReqwestError> + Send>),
-    DownloadingBody(Concat2<Decoder>),
+    Idle,
+    Resolving(Box<Future<Item = Chunk, Error = String> + Send>),
+    Downloading(Box<Future<Item = Chunk, Error = String> + Send>),
 }
 
 impl Future for AddonLockFuture {
@@ -342,18 +325,30 @@ impl Future for AddonLockFuture {
 
         loop {
             let next = match self.inner {
-                Resolving(ref mut f) => {
-                    let res = try_ready!(f.map_err(|err| format!("{}", err)).poll());
-                    ResolvingBody(res.into_body().concat2())
+                Idle => {
+                    if self.resolved.is_some() {
+                        let url = ADDON_DL_URL_TEMPLATE.replace("{}", &self.addon.name);
+                        let pending = self.client.get(&url).send()
+                            .and_then(|res| res.into_body().concat2())
+                            .map_err(|err| format!("{}", err));
+
+                        Downloading(Box::new(pending))
+                    } else {
+                        let search_term = self.addon.name
+                            .replace(" ", "+")
+                            .to_lowercase();
+
+                        let url = SEARCH_URL_TEMPLATE.replace("{}", &search_term);
+                        let pending = self.client.get(&url).send()
+                            .and_then(|res| res.into_body().concat2())
+                            .map_err(|err| format!("{}", err));
+
+                        Resolving(Box::new(pending))
+                    }
                 },
-                ResolvingBody(ref mut f) => {
+                Resolving(ref mut f) => {
                     let body = try_ready!(f.map_err(|err| format!("{}", err)).poll());
                     let page = String::from_utf8(body.to_vec()).unwrap();
-
-                    // TODO: lowercase this all
-                    // let search_term = addon.name.replace(" ", "+");
-                    // let search_url = SEARCH_URL_TEMPLATE.replace("{}", &search_term);
-                    // let search_page = ::reqwest::get(&search_url).unwrap().text().unwrap();
 
                     let doc = Document::from(page.as_str());
                     let result_node = doc.find(
@@ -366,16 +361,15 @@ impl Future for AddonLockFuture {
                     let resolved = String::from(href.split("?id=").last().unwrap());
 
                     let addon_url = ADDON_URL_TEMPLATE.replace("{}", &resolved);
-                    let pending = self.client.get(&addon_url).send();
+                    let pending = self.client.get(&addon_url).send()
+                        .and_then(|res| res.into_body().concat2())
+                        .map_err(|err| format!("{}", err));
+
                     self.resolved = Some(resolved);
 
                     Downloading(Box::new(pending))
                 },
                 Downloading(ref mut f) => {
-                    let res = try_ready!(f.map_err(|err| format!("{}", err)).poll());
-                    DownloadingBody(res.into_body().concat2())
-                },
-                DownloadingBody(ref mut f) => {
                     let body = try_ready!(f.map_err(|err| format!("{}", err)).poll());
                     let page = String::from_utf8(body.to_vec()).unwrap();
                     let doc = Document::from(page.as_str());
@@ -387,11 +381,10 @@ impl Future for AddonLockFuture {
                     );
 
                     // TODO: why is version not there wtf
-                    let _version = version_els.next().unwrap().text();
+                    let version = version_els.next().unwrap().text();
                     let date = version_els.next().unwrap().text();
                     let time = version_els.next().unwrap().text();
 
-                    let version = String::from("TODO");
                     let date_str = format!("{} {}:00", date, time);
 
                     let parsed_date = Utc.datetime_from_str(&date_str, "%b %e, %Y %H:%M:%S").unwrap();
