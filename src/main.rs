@@ -144,6 +144,7 @@ fn add(name: String) -> Result<(), Box<Error>> {
     let name = String::from(name_parts[1]);
 
     let addon = Addon { name, provider };
+    let addon_for_lock = addon.clone();
 
     let addon_dir: &'static Path = &Path::new(ADDONS_DIR);
     if !addon_dir.is_dir() {
@@ -152,15 +153,7 @@ fn add(name: String) -> Result<(), Box<Error>> {
 
     let _temp_dir = create_temp_dir()?;
 
-    let lock_future = match providers::get_lock(&addon, None) {
-        Some(f) => f,
-        _ => {
-            println!("addon could not be found");
-            return Ok(());
-        },
-    };
-
-    let add_future = lock_future
+    let add_future = |f: providers::AddonLockFuture| { f
         .and_then(move |(addon, lock)| {
             println!("downloading {}", addon.name);
             providers::download_addon(&addon, &lock)
@@ -177,21 +170,21 @@ fn add(name: String) -> Result<(), Box<Error>> {
                 _ => Err(String::from("download failed")),
             }
         })
-        .then(move |lock| {
+        .map(move |lock| {
             let lock_path = Path::new(&LOCK_FILE_PATH);
-            // TODO: what the f happened here
-            let lock = lock.unwrap();
             let _ = save_lock_file(&lock_path, &LOCK, &vec![lock.unwrap()]);
 
             parsed.addons.push(addon);
             let config_str = toml::to_string(&parsed).unwrap();
             let mut f = File::create(CONFIG_FILE_PATH).unwrap();
             f.write_all(config_str.as_bytes()).unwrap();
+        })
+    };
 
-            Ok(())
-        });
-
-    tokio::run(add_future);
+    match providers::get_lock(&addon_for_lock, None).map(add_future) {
+        Some(add_future) => tokio::run(add_future),
+        _ => println!("addon not found"),
+    };
 
     Ok(())
 }
