@@ -13,6 +13,7 @@ extern crate futures;
 extern crate tokio;
 
 extern crate clap;
+extern crate console;
 use clap::{App, AppSettings, SubCommand};
 
 mod extract;
@@ -25,9 +26,10 @@ use std::path::{Path, PathBuf};
 
 use futures::{Future, Stream};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Mutex;
 use std::thread;
 use std::time::Instant;
+
+use console::Term;
 
 const TEMP_DIR: &'static str = ".wam-temp";
 const ADDON_DIR_PATH: &'static str = "Interface/Addons";
@@ -55,12 +57,13 @@ pub enum Phase {
     Extracting,
 }
 
-#[derive(Debug)]
 pub struct ProgressState {
-    current_phase: Phase,
+    _current_phase: Phase,
     lines_drawn: usize,
     rx: Receiver<ProgressUpdate>,
     tx: Sender<ProgressUpdate>,
+    current: Vec<(String, &'static str)>,
+    term: Term,
 }
 
 impl ProgressState {
@@ -68,10 +71,12 @@ impl ProgressState {
         let (tx, rx) = channel();
 
         ProgressState {
-            current_phase: Phase::Idle,
+            _current_phase: Phase::Idle,
             lines_drawn: 0,
             rx,
             tx,
+            term: Term::stdout(),
+            current: Vec::new(),
         }
     }
 
@@ -95,7 +100,39 @@ impl ProgressState {
     }
 
     fn handle(&mut self, update: ProgressUpdate) {
-        println!("received update: {:?}", update);
+        use ProgressUpdate::*;
+
+        match update {
+            Started { subject, step } => {
+                if self.current.iter().position(|it| it.0 == subject).is_none() {
+                    self.current.push((subject, step));
+                }
+            }
+            Progressed { subject, step } => {
+                if let Some(idx) = self.current.iter().position(|it| it.0 == subject) {
+                    std::mem::replace(&mut self.current[idx], (subject, step));
+                }
+            }
+            Done { subject } => {
+                self.current.retain(|it| it.0 != subject);
+            }
+            _ => {}
+        }
+
+        self.redraw();
+    }
+
+    fn redraw(&mut self) {
+        if self.lines_drawn > 0 {
+            self.term.clear_last_lines(self.lines_drawn).unwrap();
+        }
+
+        for (name, step) in self.current.iter() {
+            let line = format!("{}: {}", name, step);
+            self.term.write_line(&line).unwrap();
+        }
+
+        self.lines_drawn = self.current.len();
     }
 }
 
@@ -270,6 +307,7 @@ fn install() -> Result<(), Box<Error>> {
     let _temp_dir = create_temp_dir()?;
 
     let mut state = ProgressState::new();
+    let end_tx = state.get_tx();
     let parsed_with_locks = parsed
         .addons
         .into_iter()
@@ -278,8 +316,6 @@ fn install() -> Result<(), Box<Error>> {
             (it, maybe_lock, state.get_tx())
         })
         .collect::<Vec<(Addon, Option<AddonLock>, Sender<ProgressUpdate>)>>();
-
-    let end_tx = Mutex::new(state.get_tx());
 
     let install_future = futures::future::ok::<_, String>(parsed_with_locks)
         .map(|it| {
@@ -312,12 +348,6 @@ fn install() -> Result<(), Box<Error>> {
         .map(move |new_locks| {
             let lock_path = Path::new(&LOCK_FILE_PATH);
             let _ = save_lock_file(&lock_path, &LOCK, &new_locks);
-
-            end_tx
-                .lock()
-                .unwrap()
-                .send(ProgressUpdate::AllDone)
-                .unwrap();
         })
         .map_err(|_| {});
 
@@ -328,6 +358,7 @@ fn install() -> Result<(), Box<Error>> {
     });
 
     tokio::run(install_future);
+    end_tx.send(ProgressUpdate::AllDone).unwrap();
 
     state_handle.join().unwrap();
 

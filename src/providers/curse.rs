@@ -76,32 +76,33 @@ impl Future for CurseDownloadFuture {
                         .send()
                         .map_err(|err| format!("{}", err));
 
-                    ReadingFilename(Box::new(pending))
-                }
-                ReadingFilename(ref mut f) => {
                     self.progress_tx
-                        .send(ProgressUpdate::Progressed {
+                        .send(ProgressUpdate::Started {
                             subject: self.addon.name.clone(),
                             step: "reading filename",
                         })
                         .unwrap();
 
+                    ReadingFilename(Box::new(pending))
+                }
+                ReadingFilename(ref mut f) => {
                     let res = try_ready!(f.poll());
                     let final_url = String::from(res.url().as_str());
                     let filename = String::from(final_url.split("/").last().unwrap());
                     self.filename = Some(filename);
 
                     let body = res.into_body().concat2().map_err(|err| format!("{}", err));
-                    Downloading(Box::new(body))
-                }
-                Downloading(ref mut f) => {
+
                     self.progress_tx
                         .send(ProgressUpdate::Progressed {
                             subject: self.addon.name.clone(),
-                            step: "downloading addon",
+                            step: "downloading",
                         })
                         .unwrap();
 
+                    Downloading(Box::new(body))
+                }
+                Downloading(ref mut f) => {
                     let body = try_ready!(f.map_err(|err| format!("{}", err)).poll());
 
                     self.progress_tx
@@ -179,9 +180,6 @@ impl Future for CurseLockFuture {
                         .and_then(|res| res.into_body().concat2())
                         .map_err(|err| format!("{}", err));
 
-                    Downloading(Box::new(pending))
-                }
-                Downloading(ref mut f) => {
                     self.progress_tx
                         .send(ProgressUpdate::Started {
                             subject: self.addon.name.clone(),
@@ -189,14 +187,10 @@ impl Future for CurseLockFuture {
                         })
                         .unwrap();
 
+                    Downloading(Box::new(pending))
+                }
+                Downloading(ref mut f) => {
                     let body = try_ready!(f.poll());
-
-                    self.progress_tx
-                        .send(ProgressUpdate::Started {
-                            subject: self.addon.name.clone(),
-                            step: "parsing metadata",
-                        })
-                        .unwrap();
 
                     let files_page = String::from_utf8(body.to_vec()).unwrap();
 
@@ -237,6 +231,12 @@ impl Future for CurseLockFuture {
                         version,
                         timestamp,
                     };
+
+                    self.progress_tx
+                        .send(ProgressUpdate::Done {
+                            subject: self.addon.name.clone(),
+                        })
+                        .unwrap();
 
                     return Ok(Async::Ready((
                         self.addon.clone(),

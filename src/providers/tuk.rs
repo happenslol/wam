@@ -47,6 +47,7 @@ pub fn download_addon(
         }),
         _ => DownloadInner::AddonDownloadFuture(AddonDownloadFuture {
             lock,
+            addon,
             client,
             inner: AddonDownloadInner::Idle,
             filename: None,
@@ -108,6 +109,13 @@ impl Future for HomeDownloadFuture {
                         .and_then(|res| res.into_body().concat2())
                         .map_err(|err| format!("{}", err));
 
+                    self.progress_tx
+                        .send(ProgressUpdate::Started {
+                            subject: self.addon.name.clone(),
+                            step: "getting download link",
+                        })
+                        .unwrap();
+
                     GettingDownloadLink(Box::new(pending))
                 }
                 GettingDownloadLink(ref mut f) => {
@@ -138,6 +146,13 @@ impl Future for HomeDownloadFuture {
                         .and_then(|res| res.into_body().concat2())
                         .map_err(|err| format!("{}", err));
 
+                    self.progress_tx
+                        .send(ProgressUpdate::Progressed {
+                            subject: self.addon.name.clone(),
+                            step: "downloading",
+                        })
+                        .unwrap();
+
                     Downloading(Box::new(pending))
                 }
                 Downloading(ref mut f) => {
@@ -146,6 +161,12 @@ impl Future for HomeDownloadFuture {
                     let filepath = Path::new(&".wam-temp").join(&filename);
                     let mut file = File::create(&filepath).expect("could not create file");
                     file.write_all(&body).expect("could not write to file");
+
+                    self.progress_tx
+                        .send(ProgressUpdate::Done {
+                            subject: self.addon.name.clone(),
+                        })
+                        .unwrap();
 
                     return Ok(Async::Ready((
                         filepath,
@@ -163,6 +184,7 @@ impl Future for HomeDownloadFuture {
 struct AddonDownloadFuture {
     inner: AddonDownloadInner,
     client: Client,
+    addon: Addon,
     lock: AddonLock,
     filename: Option<String>,
     progress_tx: Sender<ProgressUpdate>,
@@ -191,6 +213,13 @@ impl Future for AddonDownloadFuture {
                         .send()
                         .map_err(|err| format!("{}", err));
 
+                    self.progress_tx
+                        .send(ProgressUpdate::Started {
+                            subject: self.addon.name.clone(),
+                            step: "reading filename",
+                        })
+                        .unwrap();
+
                     ReadingFilename(Box::new(pending))
                 }
                 ReadingFilename(ref mut f) => {
@@ -204,6 +233,13 @@ impl Future for AddonDownloadFuture {
                     self.filename = Some(filename);
                     let body = res.into_body().concat2().map_err(|err| format!("{}", err));
 
+                    self.progress_tx
+                        .send(ProgressUpdate::Progressed {
+                            subject: self.addon.name.clone(),
+                            step: "downloading",
+                        })
+                        .unwrap();
+
                     Downloading(Box::new(body))
                 }
                 Downloading(ref mut f) => {
@@ -212,6 +248,12 @@ impl Future for AddonDownloadFuture {
                     let filepath = Path::new(".wam-temp").join(&filename);
                     let mut file = File::create(&filepath).expect("could not create file");
                     file.write_all(&body).expect("could not write to file");
+
+                    self.progress_tx
+                        .send(ProgressUpdate::Done {
+                            subject: self.addon.name.clone(),
+                        })
+                        .unwrap();
 
                     return Ok(Async::Ready((
                         filepath,
@@ -306,6 +348,13 @@ impl Future for HomeLockFuture {
                         .and_then(|res| res.into_body().concat2())
                         .map_err(|err| format!("{}", err));
 
+                    self.progress_tx
+                        .send(ProgressUpdate::Started {
+                            subject: self.addon.name.clone(),
+                            step: "downloading",
+                        })
+                        .unwrap();
+
                     Downloading(Box::new(pending))
                 }
                 Downloading(ref mut f) => {
@@ -329,6 +378,12 @@ impl Future for HomeLockFuture {
                         version,
                         timestamp,
                     };
+
+                    self.progress_tx
+                        .send(ProgressUpdate::Done {
+                            subject: self.addon.name.clone(),
+                        })
+                        .unwrap();
 
                     return Ok(Async::Ready((
                         self.addon.clone(),
@@ -376,6 +431,13 @@ impl Future for AddonLockFuture {
                             .and_then(|res| res.into_body().concat2())
                             .map_err(|err| format!("{}", err));
 
+                        self.progress_tx
+                            .send(ProgressUpdate::Started {
+                                subject: self.addon.name.clone(),
+                                step: "downloading",
+                            })
+                            .unwrap();
+
                         Downloading(Box::new(pending))
                     } else {
                         let search_term = self.addon.name.replace(" ", "+").to_lowercase();
@@ -387,6 +449,13 @@ impl Future for AddonLockFuture {
                             .send()
                             .and_then(|res| res.into_body().concat2())
                             .map_err(|err| format!("{}", err));
+
+                        self.progress_tx
+                            .send(ProgressUpdate::Started {
+                                subject: self.addon.name.clone(),
+                                step: "resolving",
+                            })
+                            .unwrap();
 
                         Resolving(Box::new(pending))
                     }
@@ -417,10 +486,25 @@ impl Future for AddonLockFuture {
 
                     self.resolved = Some(resolved);
 
+                    self.progress_tx
+                        .send(ProgressUpdate::Progressed {
+                            subject: self.addon.name.clone(),
+                            step: "downloading",
+                        })
+                        .unwrap();
+
                     Downloading(Box::new(pending))
                 }
                 Downloading(ref mut f) => {
                     let body = try_ready!(f.map_err(|err| format!("{}", err)).poll());
+
+                    self.progress_tx
+                        .send(ProgressUpdate::Progressed {
+                            subject: self.addon.name.clone(),
+                            step: "parsing metadata",
+                        })
+                        .unwrap();
+
                     let page = String::from_utf8(body.to_vec()).unwrap();
                     let doc = Document::from(page.as_str());
 
@@ -445,6 +529,12 @@ impl Future for AddonLockFuture {
                         version,
                         timestamp,
                     };
+
+                    self.progress_tx
+                        .send(ProgressUpdate::Done {
+                            subject: self.addon.name.clone(),
+                        })
+                        .unwrap();
 
                     return Ok(Async::Ready((
                         self.addon.clone(),
