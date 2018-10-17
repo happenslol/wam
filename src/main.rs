@@ -18,18 +18,86 @@ use clap::{App, AppSettings, SubCommand};
 mod extract;
 mod providers;
 
-use std::fs::{self, File};
-use std::path::{Path, PathBuf};
-use std::io::prelude::*;
 use std::error::Error;
+use std::fs::{self, File};
+use std::io::prelude::*;
+use std::path::{Path, PathBuf};
 
 use futures::{Future, Stream};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Mutex;
+use std::thread;
+use std::time::Instant;
 
 const TEMP_DIR: &'static str = ".wam-temp";
 const ADDON_DIR_PATH: &'static str = "Interface/Addons";
 
 const CONFIG_FILE_PATH: &'static str = "wam.toml";
 const LOCK_FILE_PATH: &'static str = "wam-lock.toml";
+
+#[derive(Debug, Clone)]
+pub enum ProgressUpdate {
+    PhaseStarted(Phase),
+    PhaseEnded(Phase),
+
+    Started { subject: String, step: &'static str },
+    Progressed { subject: String, step: &'static str },
+    Done { subject: String },
+
+    AllDone,
+}
+
+#[derive(Debug, Clone)]
+pub enum Phase {
+    Idle,
+    GettingLocks,
+    Downloading,
+    Extracting,
+}
+
+#[derive(Debug)]
+pub struct ProgressState {
+    current_phase: Phase,
+    lines_drawn: usize,
+    rx: Receiver<ProgressUpdate>,
+    tx: Sender<ProgressUpdate>,
+}
+
+impl ProgressState {
+    pub fn new() -> ProgressState {
+        let (tx, rx) = channel();
+
+        ProgressState {
+            current_phase: Phase::Idle,
+            lines_drawn: 0,
+            rx,
+            tx,
+        }
+    }
+
+    pub fn get_tx(&self) -> Sender<ProgressUpdate> {
+        self.tx.clone()
+    }
+
+    pub fn tick(&mut self) -> bool {
+        let update = match self.rx.recv() {
+            Ok(update) => update,
+            _ => return true,
+        };
+
+        match update {
+            ProgressUpdate::AllDone => return true,
+            _ => {}
+        };
+
+        self.handle(update);
+        false
+    }
+
+    fn handle(&mut self, update: ProgressUpdate) {
+        println!("received update: {:?}", update);
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ConfigFile {
@@ -73,8 +141,7 @@ lazy_static! {
             let mut contents = String::new();
             let mut f = File::open(lock_path).unwrap();
             f.read_to_string(&mut contents).unwrap();
-            toml::from_str::<LockFile>(&contents)
-                .expect("failed to parse lock file")
+            toml::from_str::<LockFile>(&contents).expect("failed to parse lock file")
         }
     };
 }
@@ -91,24 +158,20 @@ lazy_static! {
 }
 
 fn main() {
+    let now = Instant::now();
+
     let app = App::new("wam")
         .version("0.1")
         .author("Hilmar Wiegand <me@hwgnd.de>")
         .about("WoW Addon Manager")
         .setting(AppSettings::ArgRequiredElseHelp)
         .subcommands(vec![
-            SubCommand::with_name("install")
-                .about("install new addons and update existing ones"),
-
+            SubCommand::with_name("install").about("install new addons and update existing ones"),
             SubCommand::with_name("add")
                 .about("add and install a new addon")
                 .args_from_usage("[NAME] 'addon name in format <provider>/<name>'"),
-
-            SubCommand::with_name("remove")
-                .about("not implemented"),
-
-            SubCommand::with_name("search")
-                .about("not implemented"),
+            SubCommand::with_name("remove").about("not implemented"),
+            SubCommand::with_name("search").about("not implemented"),
         ]);
 
     let matches = app.get_matches();
@@ -130,6 +193,7 @@ fn main() {
     }
 
     delete_temp_dir().unwrap();
+    println!("elapsed: {:?}", now.elapsed());
 }
 
 fn add(name: String) -> Result<(), Box<Error>> {
@@ -158,32 +222,33 @@ fn add(name: String) -> Result<(), Box<Error>> {
 
     let _temp_dir = create_temp_dir()?;
 
-    let add_future = |f: providers::AddonLockFuture| { f
-        .and_then(providers::download_addon)
-        .map_err(|err| println!("error downloading: {}", err))
-        .map(move |result| {
-            match result {
-                Some((downloaded, lock)) => {
+    let state = ProgressState::new();
+
+    let add_future = |f: providers::AddonLockFuture| {
+        f.and_then(providers::download_addon)
+            .map_err(|err| println!("error downloading: {}", err))
+            .map(move |result| match result {
+                Some((downloaded, lock, _)) => {
                     println!("downloaded {}, extracting...", lock.name);
                     extract::extract_zip(downloaded, &ADDON_DIR);
                     println!("done with {}", lock.name);
                     Ok(lock)
-                },
+                }
                 _ => Err(String::from("download failed")),
-            }
-        })
-        .map(move |lock| {
-            let lock_path = Path::new(&LOCK_FILE_PATH);
-            let _ = save_lock_file(&lock_path, &LOCK, &vec![lock.unwrap()]);
+            })
+            .map(move |lock| {
+                let lock_path = Path::new(&LOCK_FILE_PATH);
+                let _ = save_lock_file(&lock_path, &LOCK, &vec![lock.unwrap()]);
 
-            parsed.addons.push(addon);
-            let config_str = toml::to_string(&parsed).unwrap();
-            let mut f = File::create(CONFIG_FILE_PATH).unwrap();
-            f.write_all(config_str.as_bytes()).unwrap();
-        })
+                parsed.addons.push(addon);
+                let config_str = toml::to_string(&parsed).unwrap();
+                let mut f = File::create(CONFIG_FILE_PATH).unwrap();
+                f.write_all(config_str.as_bytes()).unwrap();
+            })
     };
 
-    match providers::get_lock((addon_for_lock, None)).map(add_future) {
+    let all = (addon_for_lock, None, state.get_tx());
+    match providers::get_lock(all).map(add_future) {
         Some(add_future) => tokio::run(add_future),
         _ => println!("addon not found"),
     };
@@ -199,17 +264,22 @@ fn install() -> Result<(), Box<Error>> {
 
     let config = match parsed.config {
         Some(config) => config,
-        _ => GlobalConfig {
-            parallel: Some(5),
-        }
+        _ => GlobalConfig { parallel: Some(5) },
     };
 
     let _temp_dir = create_temp_dir()?;
 
-    let parsed_with_locks = parsed.addons.into_iter().map(|it| {
-        let maybe_lock = find_existing_lock(&it);
-        (it, maybe_lock)
-    }).collect::<Vec<(Addon, Option<AddonLock>)>>();
+    let mut state = ProgressState::new();
+    let parsed_with_locks = parsed
+        .addons
+        .into_iter()
+        .map(|it| {
+            let maybe_lock = find_existing_lock(&it);
+            (it, maybe_lock, state.get_tx())
+        })
+        .collect::<Vec<(Addon, Option<AddonLock>, Sender<ProgressUpdate>)>>();
+
+    let end_tx = Mutex::new(state.get_tx());
 
     let install_future = futures::future::ok::<_, String>(parsed_with_locks)
         .map(|it| {
@@ -224,39 +294,51 @@ fn install() -> Result<(), Box<Error>> {
         .flatten_stream()
         .filter_map(providers::get_lock)
         .buffer_unordered(config.parallel.unwrap_or(5))
-        .filter(|(addon, lock)| find_existing_lock(&addon)
-            .map(|found| lock.timestamp > found.timestamp)
-            .unwrap_or(true)
-        )
-        .collect()
-        .map(|it| {
-            println!("downloading {} addons...", it.len());
-            it
+        .filter(|(addon, lock, _)| {
+            find_existing_lock(&addon)
+                .map(|found| lock.timestamp > found.timestamp)
+                .unwrap_or(true)
         })
+        .collect()
         .map(futures::stream::iter_ok)
         .flatten_stream()
         .filter_map(providers::download_addon)
         .buffer_unordered(config.parallel.unwrap_or(5))
-        .map(move |(downloaded, lock)| {
+        .map(move |(downloaded, lock, _)| {
             extract::extract_zip(downloaded, &ADDON_DIR);
             lock
         })
         .collect()
-        .map(|new_locks| {
+        .map(move |new_locks| {
             let lock_path = Path::new(&LOCK_FILE_PATH);
             let _ = save_lock_file(&lock_path, &LOCK, &new_locks);
+
+            end_tx
+                .lock()
+                .unwrap()
+                .send(ProgressUpdate::AllDone)
+                .unwrap();
         })
-        .map_err(|_| ());
+        .map_err(|_| {});
+
+    let state_handle = thread::spawn(move || loop {
+        if state.tick() {
+            break;
+        }
+    });
 
     tokio::run(install_future);
+
+    state_handle.join().unwrap();
 
     Ok(())
 }
 
 fn find_existing_lock(addon: &Addon) -> Option<AddonLock> {
-    LOCK.addons.iter().find(|it| {
-        it.name == format!("{}/{}", addon.provider, addon.name)
-    }).map(Clone::clone)
+    LOCK.addons
+        .iter()
+        .find(|it| it.name == format!("{}/{}", addon.provider, addon.name))
+        .map(Clone::clone)
 }
 
 fn create_temp_dir() -> Result<PathBuf, Box<Error>> {
@@ -280,15 +362,17 @@ fn delete_temp_dir() -> Result<(), Box<Error>> {
 }
 
 fn save_lock_file(
-    path: &Path, old_lock: &LockFile,
-    new_locks: &Vec<AddonLock>
+    path: &Path,
+    old_lock: &LockFile,
+    new_locks: &Vec<AddonLock>,
 ) -> Result<(), Box<Error>> {
     let mut locks = old_lock.clone();
     for lock in new_locks {
-        let existing = old_lock.addons
-            .iter().enumerate().find(|(_, it)| {
-                it.name == lock.name
-            });
+        let existing = old_lock
+            .addons
+            .iter()
+            .enumerate()
+            .find(|(_, it)| it.name == lock.name);
 
         if let Some((i, _)) = existing {
             locks.addons[i] = lock.clone();
@@ -298,7 +382,7 @@ fn save_lock_file(
     }
 
     let lock_str = toml::to_string(&locks)?;
-    
+
     // recreate the file because we want to overwrite anyways
     let mut f = File::create(path)?;
     f.write_all(lock_str.as_bytes())?;
